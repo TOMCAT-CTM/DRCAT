@@ -15,21 +15,34 @@ This repository provide example code to run DRCAT model. It also provides pretra
 
 ## Brief description of relevant library files
 
+*   `run.py`: Wrapper used to run the inference of DRCAT
+    to produce a sequence of predictions and save as netcdf files
+
+*   `model.py`: Wrapper used to run the inference of DRCAT
+    to produce a sequence of predictions and save as netcdf files
+
+*   `Plot/Plot_function.py`: definition of plotting functions used in this paper
+
+*   `Plot/plot_results.py`: Wrapper used to run the plotting code
+
+
+
 
 ## Usage
 
 ```bash
-# ETTh1
-python -u main_informer.py --model informer --data ETTh1 --attn prob --freq h
+# single gpu
+python -u run.py 
 
-# ETTh2
-python -u main_informer.py --model informer --data ETTh2 --attn prob --freq h
-
-# ETTm1
-python -u main_informer.py --model informer --data ETTm1 --attn prob --freq t
+# multi-gpu
+python -u run.py
 ```
 
-## Raw dataset
+
+## Dataset
+Training data and inference data can be downloaded from google drive: 
+
+Please extract the zip file into the Data directory.
 
 Raw dataset of MLS L2 Version 5 data can be downloaded from NASA Goddard Space Flight Center Earth Sciences (GES) Data and Information Services Center (DISC): https://disc.gsfc.nasa.gov/
 
