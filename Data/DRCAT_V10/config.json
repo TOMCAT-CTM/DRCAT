@@ -1,0 +1,10 @@
+{
+  "EMB_SIZE": 128,
+  "N_HEAD": 8,
+  "N_LAYERS": 3,
+  "DIM_FEEDFORWARD": 512,
+  "DROPOUT": 0.05,
+  "GNN_DIM": 64,
+  "path": "/scratch/pdpv7239/experiment1026_v10/DRCAT_test_0",
+  "data_path": "/scratch/pdpv7239/SSA_dataset_v10/"
+}
