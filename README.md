@@ -40,7 +40,7 @@ python -u run.py
 
 
 ## Dataset
-Training data and inference data can be downloaded from google drive: 
+Training data and inference data can be downloaded from google drive: https://drive.google.com/file/d/1rLmVCnW-Ca_lP-sn1CN7tk2s9f3zG6gk/view?usp=sharing
 
 Please extract the zip file into the Data directory.
 
