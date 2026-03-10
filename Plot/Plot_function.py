@@ -37,7 +37,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable # <--- 1. 导入新工�
 
 
 
-Constant_var_path = '/scratch/pdpv7239/constant_var/'
+Constant_var_path = 'Data/constant_var_data'  # CONSTANT_VAR_DATA_DIR
 
 
 
@@ -82,7 +82,7 @@ def perform_weighted_gridding(
     lat_half_width: float = 1.5,
     lon_half_width: float = 8.0,
     search_radius_factor: float = 2.0
-) -> (np.ndarray, np.ndarray, np.ndarray):
+    ) -> (np.ndarray, np.ndarray, np.ndarray):
     """
     在[0, 360]经度范围内，对稀疏数据进行加权网格化。
     """
@@ -617,6 +617,10 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
         print("错误: 必须有 'True MLS OH' 数据才能进行比较。已跳过绘图。")
         return
 
+    # set unit = '10^6 cm^-3' for all datasets
+    for key in loaded_data:
+        loaded_data[key] = loaded_data[key] / 1e6
+
     # --- 2. 指标计算 (修改为分列逻辑) ---
     comparisons = {
         "Pred. MLS vs True": ('ML-Predicted OH', 'True MLS OH'),
@@ -665,25 +669,48 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
     metrics_text_aligned = "\n".join(formatted_lines)
     
     # --- 3. 绘图风格设置 --- (此部分不变)
-    plt.style.use('seaborn-v0_8-paper')
+    font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        # 获取加载后的字体真实名称（通常是 'Myriad Pro'）
+        prop = fm.FontProperties(fname=font_path)
+        myriad_font = prop.get_name()
+    else:
+        print(f"Warning: Font file {font_path} not found. Using sans-serif.")
+        myriad_font = 'Arial'
+
     plt.rcParams.update({
-        'font.family': 'sans-serif', 'font.sans-serif': ['Arial', 'Helvetica'],
-        'axes.labelsize': 14, 'xtick.labelsize': 12, 'ytick.labelsize': 12,
-        'axes.titlesize': 12, 'figure.titlesize': 12, 'axes.linewidth': 1.2,
+        'font.family': 'sans-serif', 
+        'font.sans-serif': ['Myriad Pro', 'Myriad', 'Arial', 'Helvetica'], # 首选 Myriad
+        'pdf.fonttype': 42,      # 确保矢量图文字不被转为路径
+        'ps.fonttype': 42,
+        'axes.labelsize': 8,     # 轴标签字号设为 8pt (期刊默认字号)
+        'xtick.labelsize': 8,    # 刻度字号设为 6pt (期刊允许的最小字号)
+        'ytick.labelsize': 8,
+        'axes.titlesize': 8,     # 子图标题设为 8pt
+        'figure.titlesize': 8,
+        'axes.linewidth': 0.5,   # 线宽 0.5pt (需大于期刊规定的 0.28pt)
+        # --- 新增：调整刻度线长度和宽度 ---
+        'xtick.major.size': 2.5,   # X轴主刻度线长度缩短 (默认约 3.5-4)
+        'ytick.major.size': 2.5,   # Y轴主刻度线长度缩短
+        'xtick.major.width': 0.5,  # 刻度线粗细与坐标轴线宽保持一致
+        'ytick.major.width': 0.5,  # 刻度线粗细与坐标轴线宽保持一致
+        # 'xtick.minor.size': 0,     # 禁用次要刻度线 (符合期刊要求)
+        # 'ytick.minor.size': 0,     # 禁用次要刻度线 (符合期刊要求)
     })
 
-    # --- 4. 绘图 --- (此部分不变)
+    # --- 4. 绘图 ---
     plot_order = ['True MLS OH', 'ML-Predicted OH', 'Calculated SSA-OH', 'TOMCAT OH']
     plot_data = {k: loaded_data[k] for k in plot_order if k in loaded_data}
     num_plots = len(plot_data)
     if num_plots == 0: return
 
-    # 调整画布高度以实现紧凑布局
+    # 调整画布尺寸：严格设定为双栏宽度 7.25 英寸，高度适中以保持比例
     fig, axes = plt.subplots(
         nrows=1, ncols=num_plots, 
-        figsize=(5 * num_plots, 6.5), # 减小了高度
+        figsize=(7.25, 3),         # 修改为符合期刊的双栏宽 7.25 in
         sharex=True, sharey=True,
-        gridspec_kw={'bottom': 0.1}  # 增加底部空间以容纳文本
+        gridspec_kw={'bottom': 0.25} # 增加底部空间以容纳指标文本
     )
     if num_plots == 1: axes = [axes]
     
@@ -696,61 +723,339 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
             ax=ax, x='lat', y='pressure', cmap='turbo',
             vmin=0, vmax=25, add_colorbar=False
         )
-        ax.set_title(title)
+        ax.set_title(title, pad=3)
         ax.set_xlabel(''); ax.set_ylabel('')
-        # 添加指标到对比子图下方（vs True）
+        
+        # 添加指标到对比子图下方
         if title != 'True MLS OH':
             metrics = _calculate_metrics(loaded_data['True MLS OH'].values, data.values)
             if metrics:
                 metric_str = f"RMSE: {metrics['rmse']:.2f}  R²: {metrics['r2']:.3f}  SSIM: {metrics['ssim']:.3f}"
-                ax.text(0.5, -0.14, metric_str, ha='center', va='top', transform=ax.transAxes, fontsize=11)
-    # --- 5. 布局与美化 (修改部分) ---
-    fig.supxlabel('Latitude (°N)', fontsize=14, y=0.02)
-    fig.supylabel('Pressure (hPa)', fontsize=14, x=0.06)
+                # 字体大小修改为 6pt，以适应狭窄的子图宽度
+                ax.text(0.5, -0.22, metric_str, ha='center', va='top', transform=ax.transAxes, fontsize=7)
+                
+    # --- 5. 布局与美化 ---
+    # 修改全局坐标轴标签字体大小为 8pt
+    fig.supxlabel('Latitude (°N)', fontsize=8, y=0.14)
+    fig.supylabel('Pressure (hPa)', fontsize=8, x=0.02,y=0.6)
     
     axes[0].set_yscale('log')
-    # axes[0].invert_yaxis()
-    # 修正y轴范围：使用True MLS OH的精确压力范围，避免自动扩展
     true_data = loaded_data['True MLS OH']
     max_p = true_data.pressure.max().values
     min_p = true_data.pressure.min().values
-    axes[0].set_ylim(max_p, min_p)  # 设置为max到min以反转轴，无需invert_yaxis()
+    axes[0].set_ylim(max_p, min_p)  
 
-    # 调整布局以适应更紧凑的文本框
-    fig.subplots_adjust(left=0.09, right=0.86, top=0.85, bottom=0.28)
-    
-    cbar_ax = fig.add_axes([0.88, 0.1, 0.015, 0.75])
-    fig.colorbar(pcm, cax=cbar_ax, label=cbar_label)
-    # adjust colorbar limits
-    # pcm.set_clim(0, 30)
+    # 调整整体布局比例，避免空白浪费
+    fig.subplots_adjust(left=0.08, right=0.9, top=0.95, bottom=0.25, wspace=0.095)
+    # fig.tight_layout(rect=[0, 0.02, 1, 0.95])
 
-    # --- MODIFICATION: 添加日期文本 ---
-    data_date_obj = datetime.strptime(f'{year}-{day_of_year}', '%Y-%j')
-    formatted_date = data_date_obj.strftime('%d %b %Y')    
-    fig.text(
-        0.9, 0.9,
-        f'Date: {formatted_date}', 
-        ha='right', va='bottom',
-        fontsize=11, color='grey', alpha=0.5
-    )
-    # 添加指标文本框 (新布局)
-    # a. 添加标题
-    # fig.text(0.5, 0.18, "Evaluation Metrics", ha="center", va="bottom", fontsize=14, weight='bold')
+    # 调整 Colorbar 宽度和位置
+    cbar_ax = fig.add_axes([0.915, 0.25, 0.012, 0.7])
+    cbar = fig.colorbar(pcm, cax=cbar_ax)
+    cbar.set_label(cbar_label, size=8)
+    cbar.ax.tick_params(labelsize=6) # colorbar 刻度设为 6pt
     
-    # b. 添加对齐后的指标
-    # fig.text(0.5, 0, metrics_text_aligned,
-    #          ha="center", va="top",
-    #          fontsize=10,  # 使用稍小的字号
-    #          fontfamily='monospace',  # 使用等宽字体确保对齐
-    #          )
 
-    # fig.suptitle(f'Zonal Mean OH Comparison - {year}, Day {day_of_year}', fontsize=18)
-    
-    plot_path = os.path.join(plot_dir, f'zonal_mean_comparison_{year}_day{day_of_year}_sci_compact.png')
-    plt.savefig(plot_path, dpi=400, bbox_inches='tight')
+
+    # --- 添加日期文本 ---
+    # data_date_obj = datetime.strptime(f'{year}-{day_of_year}', '%Y-%j')
+    # formatted_date = data_date_obj.strftime('%d %b %Y')    
+    # fig.text(
+    #     0.9, 0.95,
+    #     f'Date: {formatted_date}', 
+    #     ha='right', va='bottom',
+    #     fontsize=6, color='grey', alpha=0.7 # 字体修改为 6pt
+    # )
+
+    # 保存图片：建议后缀同时改为 .pdf 以生成矢量图
+    plot_path = os.path.join(plot_dir, f'Figure2_zonal_mean_comparison_{year}_day{day_of_year}_sci_compact.pdf')
+    plt.savefig(plot_path, dpi=400)
     plt.close(fig)
     print(f"✅ 已保存科研风格对比图 (紧凑布局): {plot_path}")
 
+    # plt.style.use('seaborn-v0_8-paper')
+    # plt.rcParams.update({
+    #     'font.family': 'sans-serif', 'font.sans-serif': [myriad_font, 'Arial', 'Helvetica'],
+    #     'axes.labelsize': 14, 'xtick.labelsize': 12, 'ytick.labelsize': 12,
+    #     'axes.titlesize': 12, 'figure.titlesize': 12, 'axes.linewidth': 1.2,
+    # })
+
+    # # --- 4. 绘图 --- (此部分不变)
+    # plot_order = ['True MLS OH', 'ML-Predicted OH', 'Calculated SSA-OH', 'TOMCAT OH']
+    # plot_data = {k: loaded_data[k] for k in plot_order if k in loaded_data}
+    # num_plots = len(plot_data)
+    # if num_plots == 0: return
+
+    # # 调整画布高度以实现紧凑布局
+    # fig, axes = plt.subplots(
+    #     nrows=1, ncols=num_plots, 
+    #     figsize=(5 * num_plots, 6.5), # 减小了高度
+    #     sharex=True, sharey=True,
+    #     gridspec_kw={'bottom': 0.1}  # 增加底部空间以容纳文本
+    # )
+    # if num_plots == 1: axes = [axes]
+    
+    # vmax = loaded_data['True MLS OH'].max()
+    # cbar_label = r'OH Density (10$^{6}$ cm$^{-3}$)'
+
+    # for i, (title, data) in enumerate(plot_data.items()):
+    #     ax = axes[i]
+    #     pcm = data.plot.pcolormesh(
+    #         ax=ax, x='lat', y='pressure', cmap='turbo',
+    #         vmin=0, vmax=25, add_colorbar=False
+    #     )
+    #     ax.set_title(title)
+    #     ax.set_xlabel(''); ax.set_ylabel('')
+    #     # 添加指标到对比子图下方（vs True）
+    #     if title != 'True MLS OH':
+    #         metrics = _calculate_metrics(loaded_data['True MLS OH'].values, data.values)
+    #         if metrics:
+    #             metric_str = f"RMSE: {metrics['rmse']:.2f}  R²: {metrics['r2']:.3f}  SSIM: {metrics['ssim']:.3f}"
+    #             ax.text(0.5, -0.14, metric_str, ha='center', va='top', transform=ax.transAxes, fontsize=11)
+    # # --- 5. 布局与美化 (修改部分) ---
+    # fig.supxlabel('Latitude (°N)', fontsize=14, y=0.02)
+    # fig.supylabel('Pressure (hPa)', fontsize=14, x=0.06)
+    
+    # axes[0].set_yscale('log')
+    # # axes[0].invert_yaxis()
+    # # 修正y轴范围：使用True MLS OH的精确压力范围，避免自动扩展
+    # true_data = loaded_data['True MLS OH']
+    # max_p = true_data.pressure.max().values
+    # min_p = true_data.pressure.min().values
+    # axes[0].set_ylim(max_p, min_p)  # 设置为max到min以反转轴，无需invert_yaxis()
+
+    # # 调整布局以适应更紧凑的文本框
+    # fig.subplots_adjust(left=0.09, right=0.86, top=0.85, bottom=0.28)
+    
+    # cbar_ax = fig.add_axes([0.88, 0.1, 0.015, 0.75])
+    # fig.colorbar(pcm, cax=cbar_ax, label=cbar_label)
+    # # adjust colorbar limits
+    # # pcm.set_clim(0, 30)
+
+    # # --- MODIFICATION: 添加日期文本 ---
+    # data_date_obj = datetime.strptime(f'{year}-{day_of_year}', '%Y-%j')
+    # formatted_date = data_date_obj.strftime('%d %b %Y')    
+    # fig.text(
+    #     0.9, 0.9,
+    #     f'Date: {formatted_date}', 
+    #     ha='right', va='bottom',
+    #     fontsize=11, color='grey', alpha=0.5
+    # )
+    # # 添加指标文本框 (新布局)
+    # # a. 添加标题
+    # # fig.text(0.5, 0.18, "Evaluation Metrics", ha="center", va="bottom", fontsize=14, weight='bold')
+    
+    # # b. 添加对齐后的指标
+    # # fig.text(0.5, 0, metrics_text_aligned,
+    # #          ha="center", va="top",
+    # #          fontsize=10,  # 使用稍小的字号
+    # #          fontfamily='monospace',  # 使用等宽字体确保对齐
+    # #          )
+
+    # # fig.suptitle(f'Zonal Mean OH Comparison - {year}, Day {day_of_year}', fontsize=18)
+    
+    # plot_path = os.path.join(plot_dir, f'zonal_mean_comparison_{year}_day{day_of_year}_sci_compact.png')
+    # plt.savefig(plot_path, dpi=400, bbox_inches='tight')
+    # plt.close(fig)
+    # print(f"✅ 已保存科研风格对比图 (紧凑布局): {plot_path}")
+
+
+def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
+    """
+    以科研出版风格生成纬向平均OH浓度差异图。
+    
+    绘制4列：
+    - 第1列：MLS Obs OH（绝对值）
+    - 第2列：DRCAT predicted OH - MLS Obs OH
+    - 第3列：SSA OH - MLS Obs OH
+    - 第4列：TOMCAT OH - MLS Obs OH
+    """
+    print(f"\n--- 正在为 {year} 年, 第 {day_of_year} 天生成差异对比图 ---")
+    
+    # --- 字体加载部分 ---
+    font_dir = 'fonts'
+    if os.path.exists(font_dir):
+        print(f"正在从 '{font_dir}' 加载本地字体...")
+        for font_file in fm.findSystemFonts(fontpaths=[font_dir]):
+            fm.fontManager.addfont(font_file)
+        print("本地字体加载完成。")
+    else:
+        print(f"警告: 本地字体文件夹 '{font_dir}' 不存在，将使用系统默认字体。")
+
+    # --- 1. 数据加载 ---
+    data_sources = {
+        'ML-Predicted OH': f'predicted_MLS_OH_density_gridded_{year}.nc',
+        'Calculated SSA-OH': f'calculated_SSA_OH_density_gridded_{year}.nc',
+        'Predicted SSA-OH': f'predicted_SSA_OH_density_gridded_{year}.nc',
+    }
+    loaded_data = {}
+    for title, fname in data_sources.items():
+        filepath = os.path.join(output_dir, fname)
+        data_array = _load_and_process_data(filepath, day_of_year)
+        if data_array is not None:
+            loaded_data[title] = data_array
+    
+    # 从constant-var 路径加载 True MLS OH 和 TOMCAT OH
+    true_mls_path = os.path.join(Constant_var_path, f'true_MLS_OH_density_gridded_{year}.nc')
+    print(f"Loading True MLS OH data from: {true_mls_path}")
+    tomcat_path = os.path.join(Constant_var_path, f'TOMCAT_OH_density_gridded_{year}.nc')
+    true_mls_data = _load_and_process_data(true_mls_path, day_of_year)
+    if true_mls_data is not None:
+        loaded_data['True MLS OH'] = true_mls_data
+    tomcat_data = _load_and_process_data(tomcat_path, day_of_year)
+    if tomcat_data is not None:
+        loaded_data['TOMCAT OH'] = tomcat_data
+
+    if 'True MLS OH' not in loaded_data:
+        print("错误: 必须有 'True MLS OH' 数据才能进行比较。已跳过绘图。")
+        return
+
+    # 转换单位为 10^6 cm^-3
+    for key in loaded_data:
+        loaded_data[key] = loaded_data[key] / 1e6
+
+    # --- 2. 计算差异数据 ---
+    true_mls = loaded_data['True MLS OH']
+    differences = {}
+    plot_titles = ['True MLS OH']
+    plot_data_list = [true_mls]
+    
+    # DRCAT 差异
+    if 'ML-Predicted OH' in loaded_data:
+        diff = loaded_data['ML-Predicted OH'] - true_mls
+        differences['DRCAT predicted'] = diff
+        plot_data_list.append(diff)
+        plot_titles.append('DRCAT Predicted − MLS Obs')
+    
+    # SSA 差异
+    if 'Calculated SSA-OH' in loaded_data:
+        diff = loaded_data['Calculated SSA-OH'] - true_mls
+        differences['SSA'] = diff
+        plot_data_list.append(diff)
+        plot_titles.append('SSA − MLS Obs')
+    
+    # TOMCAT 差异
+    if 'TOMCAT OH' in loaded_data:
+        diff = loaded_data['TOMCAT OH'] - true_mls
+        differences['TOMCAT'] = diff
+        plot_data_list.append(diff)
+        plot_titles.append('TOMCAT − MLS Obs')
+
+    if len(plot_data_list) < 2:
+        print("错误: 无足够数据绘制差异图。已跳过绘图。")
+        return
+
+    # --- 3. 绘图风格设置 ---
+    font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        prop = fm.FontProperties(fname=font_path)
+        myriad_font = prop.get_name()
+    else:
+        print(f"Warning: Font file {font_path} not found. Using sans-serif.")
+        myriad_font = 'Arial'
+
+    plt.rcParams.update({
+        'font.family': 'sans-serif', 
+        'font.sans-serif': ['Myriad Pro', 'Myriad', 'Arial', 'Helvetica'],
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+        'axes.labelsize': 8,
+        'xtick.labelsize': 8,
+        'ytick.labelsize': 8,
+        'axes.titlesize': 8,
+        'figure.titlesize': 8,
+        'axes.linewidth': 0.5,
+        'xtick.major.size': 2.5,
+        'ytick.major.size': 2.5,
+        'xtick.major.width': 0.5,
+        'ytick.major.width': 0.5,
+    })
+
+    # --- 4. 绘图 ---
+    num_plots = len(plot_data_list)
+    
+    # 主图用标准 subplots，右侧通过 subplots_adjust 预留空间给两个 colorbar
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=num_plots,
+        figsize=(7.25, 2.7),
+        sharex=True,
+        sharey=True
+    )
+    if num_plots == 1:
+        axes = [axes]
+    
+    pcm_abs = None  # 存储第一个子图的 pcm
+    pcm_diff = None  # 存储差异子图的 pcm
+    
+    # 首先获取真实数据的y轴范围，确保所有子图y轴一致
+    true_data = loaded_data['True MLS OH']
+    max_p = true_data.pressure.max().values
+    min_p = true_data.pressure.min().values
+    
+    for i, (ax, title, data) in enumerate(zip(axes, plot_titles, plot_data_list)):
+        if i == 0:
+            # 第一列：绝对值，使用 turbo 色彩
+            pcm_abs = data.plot.pcolormesh(
+                ax=ax, x='lat', y='pressure', cmap='turbo',
+                vmin=0, vmax=25, add_colorbar=False
+            )
+            ax.set_title(title, pad=3)
+            # 第一列显示y轴标签和刻度
+            ax.set_ylabel('Pressure (hPa)', fontsize=8)
+            yticks = [1, 10, 30, 100]
+            ax.set_yticks(yticks)
+            ax.yaxis.set_major_formatter(FuncFormatter(log_sci_formatter))
+        else:
+            # 后续列：差异，使用 RdBu_r 色彩映射（红-白-蓝）
+            # 计算差异的合理范围
+            diff_max = max(abs(data.min()), abs(data.max()))
+            if np.isnan(diff_max) or diff_max == 0:
+                diff_max = 5
+            
+            pcm_diff = data.plot.pcolormesh(
+                ax=ax, x='lat', y='pressure', cmap='RdBu_r',
+                vmin=-diff_max, vmax=diff_max, add_colorbar=False
+            )
+            ax.set_title(title, pad=3)
+            # 后续列不显示y轴标签和刻度标签
+            ax.set_ylabel('')
+            ax.tick_params(axis='y', labelleft=False)
+        
+        ax.set_xlabel('')
+        
+        # 为所有axes设置相同的y轴scale和范围
+        ax.set_yscale('log')
+        ax.set_ylim(max_p, min_p)
+
+    # --- 5. 布局与美化 ---
+    fig.supxlabel('Latitude (°N)', fontsize=8, y=0.03)
+
+    # 右侧预留约 0.30 的图窗宽度用于两个独立 colorbar
+    fig.subplots_adjust(left=0.08, right=0.85, top=0.92, bottom=0.15, wspace=0.08)
+
+    # 为第一个子图（MLS Obs OH）添加独立 Colorbar（使用 add_axes）
+    if pcm_abs is not None:
+        cbar_ax_abs = fig.add_axes([0.865, 0.15, 0.01, 0.77])
+        cbar_abs = fig.colorbar(pcm_abs, cax=cbar_ax_abs)
+        cbar_abs.set_label(r'$\mathregular{OH\;density\;}$' + r'$(10^6\;cm^{-3})$', 
+                          size=7, labelpad=3)
+        cbar_abs.ax.tick_params(labelsize=7)
+    
+    # 为差异子图添加 Colorbar（使用 add_axes）
+    if pcm_diff is not None:
+        cbar_ax_diff = fig.add_axes([0.93, 0.15, 0.01, 0.77])
+        cbar_diff = fig.colorbar(pcm_diff, cax=cbar_ax_diff)
+        cbar_diff.set_label(r'$\mathregular{OH\;difference\;}$' + r'$(10^6\;cm^{-3})$', 
+                           size=7, labelpad=3)
+        cbar_diff.ax.tick_params(labelsize=7)
+
+    # 保存图片
+    plot_path = os.path.join(plot_dir, f'Figure2_Supp_zonal_mean_difference_{year}_day{day_of_year}_sci_compact.pdf')
+    plt.savefig(plot_path, dpi=600)
+    plt.close(fig)
+    print(f"✅ 已保存差异对比图: {plot_path}")
 
 
 def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
@@ -781,7 +1086,12 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
             ds_tomcat = xr.open_dataset(os.path.join(Constant_var_path, f'TOMCAT_OH_density_gridded_{year}.nc')) # <-- 新增
             
             true_var, pred_var, calc_var, tomcat_var = list(ds_true.data_vars)[0], list(ds_pred.data_vars)[0], list(ds_calc.data_vars)[0], list(ds_tomcat.data_vars)[0]
-            
+            # change unit to 10^6 cm^-3
+            ds_true[true_var] = ds_true[true_var] / 1e6
+            ds_pred[pred_var] = ds_pred[pred_var] / 1e6
+            ds_calc[calc_var] = ds_calc[calc_var] / 1e6
+            ds_tomcat[tomcat_var] = ds_tomcat[tomcat_var] / 1e6 
+
             # --- 更新共同日期的计算 ---
             common_days = np.intersect1d(ds_true.doy.values, ds_pred.doy.values)
             common_days = np.intersect1d(common_days, ds_calc.doy.values)
@@ -809,11 +1119,19 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
                 if not np.isnan(metrics_tomcat['rmse']):
                     daily_metrics.append({'date': date, 'month': date.month, **metrics_tomcat, 'type': 'TOMCAT OH'}) # <-- 新增
                 # --- 3. 计算每个压力层上的指标 (新增TOMCAT) ---
+                # debug only for first
+                # if year == years[0] and doy == common_days[0]:
+                #     print(f"Debug: {year} Day {doy} - Pressure levels: {pressure_levels}")
+                #     #print true_zonal pressure
+                #     print(f"True zonal pressure levels: {true_zonal.pressure.values}")  
+                #     print(f"Pred zonal pressure levels: {pred_zonal.pressure.values}")
+                #     print(f"Calc zonal pressure levels: {calc_zonal.pressure.values}")
+                #     print(f"TOMCAT zonal pressure levels: {tomcat_zonal.pressure.values}") # <-- 新增            
                 for p_level in pressure_levels:
-                    true_at_p = true_zonal.sel(pressure=p_level).values
-                    pred_at_p = pred_zonal.sel(pressure=p_level).values
-                    calc_at_p = calc_zonal.sel(pressure=p_level).values
-                    tomcat_at_p = tomcat_zonal.sel(pressure=p_level).values # <-- 新增
+                    true_at_p = true_zonal.sel(pressure=p_level,method='nearest').values
+                    pred_at_p = pred_zonal.sel(pressure=p_level,method='nearest').values
+                    calc_at_p = calc_zonal.sel(pressure=p_level,method='nearest').values
+                    tomcat_at_p = tomcat_zonal.sel(pressure=p_level,method='nearest').values # <-- 新增
 
                     metrics_p_pred = _calculate_metrics_2(true_at_p, pred_at_p)
                     metrics_p_calc = _calculate_metrics_2(true_at_p, calc_at_p)
@@ -827,36 +1145,72 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
                         pressure_level_metrics.append({'pressure': p_level, 'rmse': metrics_p_tomcat['rmse'], 'type': 'TOMCAT OH'}) # <-- 新增
 
         except FileNotFoundError as e:
+
             print(f"警告: 找不到 {year} 年所需的数据文件，已跳过。缺失文件: {e.filename}")
             continue
-    
+
+
     if not daily_metrics:
         print("未能处理足够的数据以生成图表。")
         return
 
     df_daily = pd.DataFrame(daily_metrics)
     df_pressure = pd.DataFrame(pressure_level_metrics)
+    
+    # 将pressure转换为字符串，以确保作为分类变量处理所有压力水平
+    df_pressure['pressure_str'] = df_pressure['pressure'].apply(lambda x: f"{float(x):.2f}")
+
+    #### 绘图设置
+    plt.style.use('seaborn-v0_8-paper')
+
+    # load regular font and bold font
+    font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    bold_font_path = 'Plot/fonts/MYRIADPRO-BOLD.OTF'
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        # 获取加载后的字体真实名称（通常是 'Myriad Pro'）
+        prop = fm.FontProperties(fname=font_path)
+        myriad_font = prop.get_name()
+        if os.path.exists(bold_font_path):
+            fm.fontManager.addfont(bold_font_path)
+            myriad_bold_font = fm.FontProperties(fname=bold_font_path)
+    else:
+        print(f"Warning: Font file {font_path} not found. Using sans-serif.")
+        myriad_font = 'Arial'
+        myriad_bold_font = fm.FontProperties(weight='bold')    
+
 
     font_settings = {
-        'title': 18,        # Title font size for each subplot
-        'label': 14,        # Axis label font size (x and y)
-        'ticks': 12,        # Axis tick label font size
-        'legend_title': 12, # Legend title font size
-        'legend_text': 10,   # Legend item font size
-        'offset_text': 12   # <-- New: Font size for axis multipliers (e.g., 1e6)
-
+        'title': 8,        
+        'label': 8,        
+        'ticks': 8,        
+        'legend_title': 8, 
+        'legend_text': 8,  
+        'offset_text': 8,
+        'panel':9,
+        'line_width':0.8,
+        'box_line_width':0.5
     }
 
-    # Update global font settings
+    # 全局字体更新：首选 Myriad，强制使用 sans-serif，关闭次要刻度
     plt.rcParams.update({
-        'font.sans-serif': ['Arial', 'Helvetica'],
-        'font.size': font_settings['ticks'] # Set a default font size
+        'font.family': 'sans-serif',
+        'font.sans-serif': [myriad_font, 'Myriad', 'Arial', 'Helvetica'],
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+        'font.size': font_settings['ticks'],
+        'axes.linewidth': 0.3,
+        'xtick.major.size': 2.5,
+        'ytick.major.size': 2.5,
+        'xtick.major.width': 0.5,
+        'ytick.major.width': 0.5,
+        # 'xtick.minor.size': 0,
+        # 'ytick.minor.size': 0,
     })
     # --- 4. 绘图 (更新调色板) ---
-    plt.style.use('seaborn-v0_8-paper')
-    plt.rcParams.update({'font.sans-serif': ['Arial', 'Helvetica']})
+    # plt.rcParams.update({'font.sans-serif': ['Arial', 'Helvetica']})
     
-    fig, axes = plt.subplots(2, 2, figsize=(16, 14), gridspec_kw={'height_ratios': [2, 2]})
+    fig, axes = plt.subplots(2, 2, figsize=(7.25, 6.5), gridspec_kw={'height_ratios': [2, 2]})
 
     # --- Palette including TOMCAT ---
     palette = {
@@ -866,79 +1220,95 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
     }
 
     # --- Plot 1: RMSE Distribution ---
-    sns.histplot(data=df_daily, x='rmse', hue='type', bins=200, kde=True, ax=axes[0, 0], palette=palette, stat='probability')
+    sns.histplot(data=df_daily, x='rmse', hue='type', bins=200, kde=True, ax=axes[0, 0], palette=palette, stat='probability',line_kws={'linewidth':font_settings['line_width']})
     axes[0, 0].set_xlim(0.9, 4)
-    axes[0, 0].set_title('a) Daily RMSE Distribution', fontsize=font_settings['title'])
+    axes[0, 0].set_title('Daily RMSE Distribution', fontsize=font_settings['title'])
+    axes[0, 0].text(0.02, 0.95, 'A', transform=axes[0, 0].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
     axes[0, 0].set_xlabel(r'RMSE (molec./10$^{6}$ cm$^{-3}$)', fontsize=font_settings['label'])
     axes[0, 0].set_ylabel('Probability', fontsize=font_settings['label'])
     axes[0, 0].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
-    axes[0, 0].grid(True, linestyle='--', alpha=0.6)
-    sns.move_legend(axes[0, 0], "upper right", title='Comparison Type',
-                    title_fontsize=font_settings['legend_title'], fontsize=font_settings['legend_text'])
+    # axes[0, 0].grid(True, linestyle='--', alpha=0.6)
 
     # --- Plot 2: R² Distribution ---
-    sns.histplot(data=df_daily, x='r2', hue='type', bins=200, kde=True, ax=axes[0, 1], palette=palette,stat='probability')
+    sns.histplot(data=df_daily, x='r2', hue='type', bins=200, kde=True, ax=axes[0, 1], palette=palette,stat='probability',line_kws={'linewidth':font_settings['line_width']})
     axes[0, 1].set_xlim(0.8, 1)
-    axes[0, 1].set_title(r'b) Daily $R^2$ Distribution', fontsize=font_settings['title'])
+    axes[0, 1].set_title(r'Daily $R^2$ Distribution', fontsize=font_settings['title'])
+    axes[0, 1].text(0.02, 0.95, 'B', transform=axes[0, 1].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
     axes[0, 1].set_xlabel(r'Coefficient of Determination ($R^2$)', fontsize=font_settings['label'])
     axes[0, 1].set_ylabel('Frequency', fontsize=font_settings['label'])
     axes[0, 1].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
-    axes[0, 1].grid(True, linestyle='--', alpha=0.6)
-    sns.move_legend(axes[0, 1], "upper left", title='Comparison Type',
-                    title_fontsize=font_settings['legend_title'], fontsize=font_settings['legend_text'])
+    # axes[0, 1].grid(True, linestyle='--', alpha=0.6)
 
-    boxplot_kwargs = {"boxprops": {'alpha': 0.7}}
+    boxplot_kwargs = {
+        "boxprops": {'alpha': 0.7, 'linewidth':font_settings['box_line_width']},
+        "whiskerprops": {'linewidth': font_settings['box_line_width']},
+        "capprops": {'linewidth': font_settings['box_line_width']},
+        "medianprops": {'linewidth': font_settings['box_line_width']}
+    }
 
     # --- Plot 3: Monthly RMSE Boxplot ---
     sns.boxplot(data=df_daily, x='month', y='rmse', hue='type', ax=axes[1, 0], palette=palette, showfliers=False, **boxplot_kwargs)
     axes[1, 0].set_ylim(0.9, 2.75)
-    axes[1, 0].set_title('c) Monthly RMSE Statistics', fontsize=font_settings['title'])
+    axes[1, 0].set_xlim(0.5, 12.5)
+    axes[1, 0].set_title('Monthly RMSE Statistics', fontsize=font_settings['title'])
+    axes[1, 0].text(0.02, 0.95, 'C', transform=axes[1, 0].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
     axes[1, 0].set_xlabel('Month', fontsize=font_settings['label'])
     axes[1, 0].set_ylabel(r'Daily RMSE (molec./10$^{6}$ cm$^{-3})$', fontsize=font_settings['label'])
-    axes[1, 0].set_xticklabels(['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'])
+    # 设置月份刻度
+    month_labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    axes[1, 0].set_xticks(range(1, 13))
+    axes[1, 0].set_xticklabels(month_labels)
     axes[1, 0].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
-    axes[1, 0].grid(True, axis='y', linestyle='--', alpha=0.6)
-    sns.move_legend(axes[1, 0], "upper right", title='Comparison Type',
-                    title_fontsize=font_settings['legend_title'], fontsize=font_settings['legend_text'])
+    # axes[1, 0].grid(True, axis='y', linestyle='--', alpha=0.6)
     import matplotlib.ticker as mticker
     # --- Plot 4: Pressure Level RMSE Boxplot (Horizontal) ---
-    sns.boxplot(data=df_pressure, y='pressure', x='rmse', hue='type', ax=axes[1, 1], palette=palette, orient='h', showfliers=False, **boxplot_kwargs)
-    axes[1, 1].set_title('d) RMSE by Pressure Level', fontsize=font_settings['title'])
+    sns.boxplot(data=df_pressure, y='pressure_str', x='rmse', hue='type', ax=axes[1, 1], palette=palette, orient='h', showfliers=False, **boxplot_kwargs)
+    axes[1, 1].set_title('RMSE by Pressure Level', fontsize=font_settings['title'])
+    axes[1, 1].text(0.02, 0.95, 'D', transform=axes[1, 1].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
     axes[1, 1].set_ylabel('Pressure (hPa)', fontsize=font_settings['label'])
     axes[1, 1].set_xlabel(r'RMSE (molec./10$^{6}$ cm$^{-3}$)', fontsize=font_settings['label'])
     axes[1, 1].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
 
-    # 1. 获取当前Y轴的刻度标签 (它们是字符串)
-    current_labels = [item.get_text() for item in axes[1, 1].get_yticklabels()]
-
-    # 2. 将它们转换为浮点数，格式化为两位小数，然后存为新列表
-    #    使用 try-except 来避免标签为空或非数字时出错
-    new_labels = []
-    for label in current_labels:
-        try:
-            # 将 "850" -> 850.0 -> "850.00"
-            new_labels.append(f"{float(label):.2f}")
-        except ValueError:
-            # 如果标签不是数字 (例如空字符串)，保持原样
-            new_labels.append(label)
-
-    # 3. 将新格式化的标签设置回去
-    axes[1, 1].set_yticklabels(new_labels)
+    # # 获取所有唯一的压力水平并排序
+    # unique_pressures = sorted(df_pressure['pressure'].unique())
+    
+    # # 为所有的压力点设置刻度位置（0到n-1）和对应的标签
+    # tick_positions = np.arange(len(unique_pressures))
+    # formatted_labels = [f"{float(p):.2f}" for p in unique_pressures]
+    
+    # # 设置y轴刻度位置和标签
+    # axes[1, 1].set_yticks(tick_positions)
+    # axes[1, 1].set_yticklabels(formatted_labels)
 
     # axes[1, 1].invert_yaxis()
-    axes[1, 1].grid(True, axis='x', linestyle='--', alpha=0.6)
-    sns.move_legend(axes[1, 1], "upper right", title='Comparison Type',
-                    title_fontsize=font_settings['legend_title'], fontsize=font_settings['legend_text'])
+    # axes[1, 1].grid(True, axis='x', linestyle='--', alpha=0.6)
     
     axes[0, 0].xaxis.get_offset_text().set_size(font_settings['offset_text']) # <-- New: Adjust size of '1e6'
     axes[0, 1].xaxis.get_offset_text().set_size(font_settings['offset_text']) # <-- New: Adjust size of '1e6'
     axes[1, 0].yaxis.get_offset_text().set_size(font_settings['offset_text']) # <-- New: Adjust size of '1e6'
     axes[1, 1].xaxis.get_offset_text().set_size(font_settings['offset_text']) # <-- New: Adjust size of '1e6'   
 
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # 在删除legend前先保存handles和labels
+    handles, labels = axes[1, 1].get_legend_handles_labels()
+    
+    # remove legend in subplots
+    for ax in axes.flat:
+        if ax.get_legend():
+            ax.get_legend().remove()
+    
+    # 添加无边框的统一legend
+    if handles and labels:
+        fig.legend(handles=handles, labels=labels, loc='lower center', ncol=3,
+                   bbox_to_anchor=(0.5, 0.48), fontsize=font_settings['legend_text'],
+                   frameon=False)
+    
+    plt.subplots_adjust(wspace=0.25, hspace=0.4, left=0.08, right=0.97, top=0.97, bottom=0.08)
 
-    plot_path = os.path.join(plot_dir, f'comprehensive_error_analysis_{years[0]}-{years[-1]}.png')
-    plt.savefig(plot_path, dpi=400)
+    plot_path = os.path.join(plot_dir, f'Figure3_comprehensive_error_analysis_{years[0]}-{years[-1]}.pdf')
+    plt.savefig(plot_path, dpi=600)
     plt.close(fig)
     print(f"✅ 已保存包含TOMCAT的综合误差分析图: {plot_path}")
 
@@ -1094,7 +1464,7 @@ def plot_hunga_tonga_analysis(plot_year, baseline_year, doy, plot_dir, OUTPUT_DI
     # ax_h2o_map.set_title(f'Interpolated H2O Global Map at {pressure_level} hPa', fontsize=title_fontsize)
 
     # 注意：这里不再需要 levels 参数
-# --- 修改点: 无需再使用 cyclic 变量，直接使用网格化函数的输出 ---
+    # --- 修改点: 无需再使用 cyclic 变量，直接使用网格化函数的输出 ---
     cf_oh = ax_oh_map.contourf(lon_centers_oh, lat_centers_oh, oh_map_gridded, cmap='YlGnBu',alpha=0.8,
                                levels=20,
                                transform=ccrs.PlateCarree() if CARTOPY_AVAILABLE else None)
@@ -1143,10 +1513,37 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
     """
     print(f"\n--- Generating OH Profile Comparison for {year}, Day {doy} ---")
 
-    # --- 1. 设置与数据加载 ---
-    default_font_sizes = {'title': 11, 'label': 12, 'tick': 10, 'legend': 12}
+    # # --- 1. 设置与数据加载 ---
+    # default_font_sizes = {'title': 8, 'label': 9, 'tick': 8, 'legend': 8}
+    font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        # 获取加载后的字体真实名称（通常是 'Myriad Pro'）
+        prop = fm.FontProperties(fname=font_path)
+        myriad_font = prop.get_name()
+    else:
+        print(f"Warning: Font file {font_path} not found. Using sans-serif.")
+        myriad_font = 'Arial'
+
+    # 全局字体配置
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': [myriad_font],
+        # 显式重定向 cursive，防止它去系统里乱找
+        'font.cursive': [myriad_font], 
+        'font.fantasy': [myriad_font],
+        'font.serif': [myriad_font],
+        'pdf.fonttype': 42,  # 避免导出为轮廓，确保文字可编辑
+        'mathtext.fontset': 'custom',
+        'mathtext.it': f'{myriad_font}:italic',
+        'mathtext.rm': myriad_font,
+    })
+
+    # 严格按照期刊要求的 6-8 pt 字号
+    f_size = {'title': 8, 'label': 8, 'tick': 8, 'legend': 8, 'panel': 9}
+
     if font_sizes is None: font_sizes = {}
-    final_font_sizes = {**default_font_sizes, **font_sizes}
+    final_font_sizes = {**f_size, **font_sizes}
 
     data_sources = {
         'Predicted MLS-OH': f'predicted_MLS_OH_density_gridded_{year}.nc',
@@ -1195,16 +1592,20 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
             selected_points.append(bin_points.points.isel(points=random_index))
     selected_points = xr.concat(selected_points, dim='points').sortby('lat')
 
+    # Set the unit to 10^6 cm^-3 for plotting
+    for key in loaded_data:
+        loaded_data[key] = loaded_data[key] / 1e6
+
     # --- 3. 绘图 ---
     plt.style.use('seaborn-v0_8-ticks')
     ncols = 4
     nrows = (num_to_sample + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 10), sharey=True)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.25, 6), sharey=True)
     axes = axes.flatten() if num_to_sample > 1 else [axes]
-
+    
     plot_styles = {
-        'True MLS OH': {'color': 'red', 'label': 'MLS OH Obs and Uncertainty', 'zorder': 3},
-        'Predicted MLS-OH': {'color': 'green', 'linestyle': '-', 'marker': '.', 'label': 'DRCAT-Predicted OH', 'zorder': 2}
+        'True MLS OH': {'color': 'blue', 'label': 'MLS OH Obs and Uncertainty', 'zorder': 3,'linewidth': 0.8},
+        'Predicted MLS-OH': {'color': 'green', 'linestyle': '-','linewidth': 0.8,'marker': '.', 'label': 'DRCAT-Predicted OH', 'zorder': 2}
     }
 
     for i, point in enumerate(selected_points):
@@ -1252,16 +1653,31 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
                         markersize=5,        # 标记大小
                         capsize=3,           # 误差棒端点帽的大小
                         elinewidth=0.2,        # 误差棒线宽
+                        linewidth=style['linewidth'],
                         color=style['color'],
                         label=style['label'],
                         zorder=style['zorder'])
 
         ax.set_yscale('log')
-        ax.grid(True, which='major', linestyle='--', alpha=0.7)
-        ax.grid(True, which='minor', linestyle=':', alpha=0.4)
-        ax.tick_params(axis='both', which='major', labelsize=final_font_sizes['tick'])
-        if i >= len(axes) - ncols:
-            ax.set_xlabel(r'OH Density (10$^{6}$ cm$^{-3}$)', fontsize=final_font_sizes['label'])
+        # 调整坐标轴线的粗细
+        ax_linewidth = 0.8
+        for spine in ax.spines.values():
+            spine.set_linewidth(ax_linewidth)
+        # 设置 x 轴刻度间隔为 10
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+        # 设置刻度标签字体大小
+        ax.xaxis.set_tick_params(labelsize=final_font_sizes['tick'])
+        # ax.grid(True, which='major', linestyle='--', alpha=0.7)
+        # ax.grid(True, which='minor', linestyle=':', alpha=0.4)
+        # ax.tick_params(axis='both', which='major', labelsize=final_font_sizes['tick'])
+        # if i >= len(axes) - ncols:
+        #     ax.set_xlabel(r'OH Density (10$^{6}$ cm$^{-3}$)', fontsize=final_font_sizes['label'])
+    # set text for the bottom center seperately to serve as the x-axis label for the entire figure
+    # adjust its location to be centered below the subplots
+    # fig.subplots_adjust(bottom=0.12)
+    fig.text(0.5, 0.01, r'OH Density (10$^{6}$ cm$^{-3}$)', ha='center', fontsize=final_font_sizes['label'])
+    
+
 
     # --- 4. 最终美化与保存 ---
     # (此部分与之前版本相同)
@@ -1276,7 +1692,7 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
                 yticks = [1, 10, 30]
                 ax.set_yticks(yticks)
                 ax.yaxis.set_major_formatter(FuncFormatter(log_sci_formatter))
-                ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+                # ax.yaxis.set_minor_formatter(mticker.NullFormatter())
         
         max_p = loaded_data['True MLS OH'].pressure.max().values
         min_p = loaded_data['True MLS OH'].pressure.min().values
@@ -1292,19 +1708,19 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
                 if label not in labels:
                     labels.append(label)
                     handles.append(handle)
-    
+    # print(f"Legend handles: {handles}, labels: {labels}")
     if handles:
         fig.legend(handles, labels, loc='upper center', ncol=len(labels), 
                    bbox_to_anchor=(0.5, 1.0), fontsize=final_font_sizes['legend'])
 
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.tight_layout(rect=[0, 0.02, 1, 0.95])
     
     data_date_obj = datetime.strptime(f'{year}-{doy}', '%Y-%j')
     formatted_date = data_date_obj.strftime('%d %b %Y')    
-    fig.text(0.99, 0.98, f'Date: {formatted_date}', ha='right', va='top',
-             fontsize=11, color='grey', alpha=0.7)
+    # fig.text(0.99, 0.98, f'Date: {formatted_date}', ha='right', va='top',
+    #          fontsize=11, color='grey', alpha=0.7)
     
-    plot_path = os.path.join(plot_dir, f'Figure2_profile_comparison_{year}_day{doy}.png')
+    plot_path = os.path.join(plot_dir, f'Figure1_profile_comparison_{year}_day{doy}.pdf')
     plt.savefig(plot_path, dpi=400)
     plt.close(fig)
     print(f"✅ Saved final OH profile comparison plot to: {plot_path}")
