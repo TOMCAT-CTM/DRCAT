@@ -33,6 +33,7 @@ import matplotlib.colors as colors
 import matplotlib.gridspec as gridspec
 import os
 from scipy.interpolate import griddata
+from scipy.optimize import curve_fit
 from mpl_toolkits.axes_grid1 import make_axes_locatable # <--- 1. 导入新工具
 
 
@@ -40,14 +41,12 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable # <--- 1. 导入新工�
 Constant_var_path = 'Data/constant_var_data'  # CONSTANT_VAR_DATA_DIR
 
 
-
-# 尝试导入 cartopy
 try:
     import cartopy.crs as ccrs
     CARTOPY_AVAILABLE = True
 except ImportError:
     CARTOPY_AVAILABLE = False
-    print("警告: 未找到 'cartopy' 库。全球分布图将不包含地图特征。")
+    print("警告: 未找到 'cartopy' 。")
 
 
 
@@ -67,6 +66,7 @@ def log_sci_formatter(x, pos):
     else:
         return f'${int(mantissa)} \\times 10^{{{int(exponent)}}}$'
 
+
 def convert_lon_to_0_360(da: xr.DataArray) -> xr.DataArray:
     """将xarray对象的经度坐标从[-180, 180]转换为[0, 360]。"""
     # 使用 assign_coords 进行干净的坐标更新
@@ -82,11 +82,10 @@ def perform_weighted_gridding(
     lat_half_width: float = 1.5,
     lon_half_width: float = 8.0,
     search_radius_factor: float = 2.0
-    ) -> (np.ndarray, np.ndarray, np.ndarray):
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     在[0, 360]经度范围内，对稀疏数据进行加权网格化。
     """
-    # print(f"开始执行加权网格化 (搜索半径因子: {search_radius_factor})...")
     start_time = time.time()
 
     stack = data_array.stack(points=('lon', 'lat')).dropna(dim='points')
@@ -98,9 +97,6 @@ def perform_weighted_gridding(
         print("错误：筛选后没有剩下任何有效数据点。")
         return None, None, None
 
-    # print(f"网格化: {len(raw_values)} 个有效数据点。")
-
-    # --- 修改点: 在 [0, 360] 范围内创建目标网格中心点 ---
     grid_lats_centers = np.arange(-90 + lat_spacing / 2, 90, lat_spacing)
     grid_lons_centers = np.arange(0 + lon_spacing / 2, 360, lon_spacing)
     gridded_data = np.full((len(grid_lats_centers), len(grid_lons_centers)), np.nan)
@@ -108,7 +104,6 @@ def perform_weighted_gridding(
     lat_search_radius = search_radius_factor * lat_half_width
     lon_search_radius = search_radius_factor * lon_half_width
     
-    # 核心的距离计算和加权平均算法无需改变，因为它是通用的
     for i, lat_g in enumerate(grid_lats_centers):
         for j, lon_g in enumerate(grid_lons_centers):
             d_lat = np.abs(raw_lats - lat_g)
@@ -129,7 +124,6 @@ def perform_weighted_gridding(
                     gridded_data[i, j] = weighted_sum / sum_of_weights
 
     end_time = time.time()
-    # print(f"网格化完成。耗时: {end_time - start_time:.2f} 秒。")
     
     return grid_lons_centers, grid_lats_centers, gridded_data
 
@@ -145,7 +139,6 @@ def _load_and_process_data(filepath, day_of_year):
         if daily_data.notnull().any():
             return daily_data.mean(dim='lon', skipna=True)
     except (FileNotFoundError, IndexError, KeyError):
-        # 捕获文件未找到、索引错误或键错误
         print(f"Info: 未能加载或处理文件 {os.path.basename(filepath)}。")
         return None
 
@@ -153,11 +146,9 @@ def _calculate_metrics(true_arr, pred_arr):
     """
     计算两个数组之间的RMSE、R²和SSIM指标。
     """
-    # 确保数组形状一致
     if true_arr.shape != pred_arr.shape:
         return None
 
-    # 为RMSE和R²找到共有的有效数据点
     valid_mask = np.isfinite(true_arr) & np.isfinite(pred_arr)
     if valid_mask.sum() < 2:  # 至少需要两个点才能计算R²
         return None
@@ -166,11 +157,9 @@ def _calculate_metrics(true_arr, pred_arr):
     rmse = np.sqrt(mean_squared_error(v_true, v_pred))
     r2 = r2_score(v_true, v_pred)
 
-    # SSIM要求输入无NaN的数组
     true_no_nan = np.nan_to_num(true_arr)
     pred_no_nan = np.nan_to_num(pred_arr)
     
-    # 使用真实数据的范围作为SSIM的data_range，这在比较中更具一致性
     data_range = true_no_nan.max() - true_no_nan.min()
     if data_range == 0:
         ssim = 1.0 if np.all(true_no_nan == pred_no_nan) else 0.0
@@ -191,186 +180,86 @@ def _calculate_metrics_2(true_arr, pred_arr):
     return {'rmse': rmse, 'r2': r2}
 
 
-
-def plot_zonal_mean_timeline(variable_name, start_day, end_day, step_days, plot_dir, OUTPUT_DIR, year=None, plot_args=None):
+def plot_zonal_mean_and_anomaly_timeline(
+    variable_name,
+    start_day,
+    end_day,
+    step_days,
+    plot_dir,
+    OUTPUT_DIR,
+    baseline_year=2021,
+    target_year=2022,
+    plot_args=None,
+):
     """
-    绘制变量随时间变化的global zonal mean（绝对值）
-    
-    Parameters:
-    -----------
-    variable_name : str
-        变量名称，如 'ML-Predicted OH'
-    start_day : int
-        起始天数
-    end_day : int
-        结束天数
-    step_days : int
-        步长（天）
-    plot_dir : str
-        图片保存目录
-    OUTPUT_DIR : str
-        包含输入 .nc 文件的数据目录
-    year : int, optional
-        年份，如果为None则使用默认年份
-    plot_args : dict, optional
-        其他绘图参数，如图形大小等
-    """
-    print(f"\n--- Generating Zonal Mean Timeline for {variable_name} ---")
-    if plot_args is None:
-        plot_args = {'fig_h': 10, 'fig_w': 10, 'cmap':'RdBu_r'}
-    
-    fig_h = plot_args.get('fig_h', 3)
-    fig_w = plot_args.get('fig_w', 10)
-    fig_cmap = plot_args.get('cmap', 'RdBu_r')
-
-
-    if year is None:
-        year = 2022  # 默认年份
-    
-    # 确定数据文件名
-    if variable_name == 'ML-Predicted OH':
-        fname = f'predicted_MLS_OH_density_gridded_{year}.nc'
-    elif variable_name == 'MLS OH Obs':
-        fname = f'true_MLS_OH_density_gridded_{year}.nc'
-    elif variable_name == 'Calculated SSA-OH':
-        fname = f'calculated_SSA_OH_density_gridded_{year}.nc'
-    elif variable_name == 'Predicted SSA-OH':
-        fname = f'predicted_SSA_OH_density_gridded_{year}.nc'
-    elif variable_name == 'TOMCAT OH':
-        fname = f'TOMCAT_OH_density_gridded_{year}.nc'
-    else:
-        print(f"Unknown variable name: {variable_name}")
-        return
-    
-    try:
-        ds = xr.open_dataset(os.path.join(OUTPUT_DIR, fname))
-        var_name = list(ds.data_vars)[0]
-    except FileNotFoundError:
-        print(f"Could not load {fname}")
-        return
-    
-    # 设置压力层范围
-    plev_min = 0.9
-    plev_max = 33
-    
-    # 生成时间序列
-    days = range(start_day, end_day + 1, step_days)
-    n_days = len(days)
-    
-    # 创建子图
-    fig, axes = plt.subplots(nrows=n_days, ncols=1, figsize=(fig_w, fig_h*n_days), sharex=True, sharey=True)
-    
-    # 修正：确保 n_days=1 时 axes 也是一个列表
-    if n_days == 1:
-        axes = [axes]
-    else:
-        axes = axes.flatten()
-    
-    # fig.suptitle(f'{variable_name} Global Zonal Mean Timeline ({year})', fontsize=16)
-    
-    # 收集所有数据用于确定颜色范围
-    all_data = []
-    for day in days:
-        try:
-            daily_data = ds[var_name].sel(doy=day, method="nearest")
-            daily_data = daily_data.sel(pressure=slice(plev_min, plev_max))
-            if daily_data.notnull().any():
-                zonal_mean = daily_data.mean(dim='lon', skipna=True)
-                all_data.append(zonal_mean)
-        except (IndexError, KeyError):
-            continue
-    
-    if not all_data:
-        print("No data available to plot.")
-        plt.close(fig) # 关闭未使用的图形
-        return
-    
-    # 确定颜色范围
-    max_val = max(d.max() for d in all_data)
-    min_val = min(d.min() for d in all_data)
-    
-    # 绘制每个时间点的图
-    for i, day in enumerate(days):
-        try:
-            daily_data = ds[var_name].sel(doy=day, method="nearest")
-            daily_data = daily_data.sel(pressure=slice(plev_min, plev_max))
-            if daily_data.notnull().any():
-                zonal_mean = daily_data.mean(dim='lon', skipna=True)
-                zonal_mean.plot.pcolormesh(ax=axes[i], x='lat', y='pressure', 
-                                         cmap=fig_cmap, vmin=min_val, vmax=max_val,
-                                         cbar_kwargs={'label': 'N. Density (molec cm⁻³)'})
-                
-                # --- 这是关键修改 ---
-                # 2. 将 'day' (一年中的第几天) 和 'year' 转换为日期对象
-                date_obj = datetime.strptime(f'{year} {day}', '%Y %j')
-                
-                # 3. 格式化日期字符串 (例如: "January 10")
-                #    使用 .day 而不是 %d 来避免日期的前导零 (例如 "January 1" 而不是 "January 01")
-                date_str = f"{date_obj.strftime('%B')} {date_obj.day}"
-                
-                # 4. 设置新的标题
-                axes[i].set_title(f'Day {day} ({date_str})')
-                # --- 修改结束 ---
-                
-                axes[i].set_yscale('log')
-                axes[i].set_xlabel('Latitude')
-                if i == len(axes) - 1:  # 最后一个子图
-                    axes[i].invert_yaxis()
-                axes[i].set_ylabel('Pressure (hPa)')
-            else:
-                # 如果当天有索引但所有值都是 NaN
-                axes[i].text(0.5, 0.5, f'No valid data for Day {day}', 
-                             ha='center', va='center', transform=axes[i].transAxes)
-                
-        except (IndexError, KeyError):
-            # 如果当天在数据集中根本不存在
-            axes[i].text(0.5, 0.5, f'No data for Day {day}', 
-                         ha='center', va='center', transform=axes[i].transAxes)
-    
-    plt.tight_layout() #rect=[0, 0, 1, 0.96]
-    plt.savefig(os.path.join(plot_dir, f'{variable_name.replace(" ", "_")}_timeline_{year}_day{start_day}-{end_day}.png'), dpi=400)
-    plt.close(fig)
-    print(f"✅ Saved timeline plot for {variable_name}.")
-
-def plot_zonal_mean_anomaly_timeline(variable_name, start_day, end_day, step_days, plot_dir, OUTPUT_DIR,
-                                   baseline_year=2021, target_year=2022,plot_args=None):
-    """
-    绘制变量随时间变化的global zonal mean异常值
-    
-    Parameters:
-    -----------
-    variable_name : str
-        变量名称，如 'ML-Predicted OH'
-    start_day : int
-        起始天数
-    end_day : int
-        结束天数
-    step_days : int
-        步长（天）
-    plot_dir : str
-        图片保存目录
-    baseline_year : int
-        基准年份（用于计算异常值）
-    target_year : int
-        目标年份（要绘制异常值的年份）
-    plot_args : dict, optional
-        其他绘图参数，如图形大小等
+    在同一张图中并排绘制 global zonal mean（左列）和相对异常值（右列）。
     """
     if plot_args is None:
-        plot_args = {'fig_h': 10, 'fig_w': 10, 'cmap':'RdBu_r'}
-    
-    fig_h = plot_args.get('fig_h', 3)
-    fig_w = plot_args.get('fig_w', 10)
-    fig_cmap = plot_args.get('cmap', 'RdBu_r')
+        plot_args = {}
 
+    fig_w = 7.25
+    row_h = plot_args.get('row_h', 1.0)
+    hspace = plot_args.get('hspace', 0.58)
+    wspace = plot_args.get('wspace', 0.12)
+    left_margin = plot_args.get('left_margin', 0.09)
+    right_margin = plot_args.get('right_margin', 0.985)
+    top_margin = plot_args.get('top_margin', 0.965)
+    bottom_margin = plot_args.get('bottom_margin', 0.15)
+    cbar_height = plot_args.get('cbar_height', 0.022)
+    cbar_gap = plot_args.get('cbar_gap', 0.08)
+    cmap_mean = plot_args.get('cmap_mean', 'jet')
+    cmap_anomaly = plot_args.get('cmap_anomaly', 'RdBu_r')
+    anomaly_abs_max = plot_args.get('anomaly_abs_max', 100)
 
+    font_settings = {
+        'title': 8,
+        'label': 8,
+        'ticks': 8,
+        'legend_title': 8,
+        'legend_text': 8,
+        'offset_text': 8,
+        'panel': 9,
+        'cbar_label': 7,
+    }
 
-    print(f"\n--- Generating Zonal Mean Anomaly Timeline for {variable_name} ---")
+    font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    bold_font_path = 'Plot/fonts/MYRIADPRO-BOLD.OTF'
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        prop = fm.FontProperties(fname=font_path)
+        myriad_font = prop.get_name()
+        if os.path.exists(bold_font_path):
+            fm.fontManager.addfont(bold_font_path)
+            myriad_bold_font = fm.FontProperties(fname=bold_font_path)
+        else:
+            myriad_bold_font = fm.FontProperties(weight='bold')
+    else:
+        print(f"Warning: Font file {font_path} not found. Using sans-serif.")
+        myriad_font = 'Arial'
+        myriad_bold_font = fm.FontProperties(weight='bold')
+
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Myriad Pro', 'Myriad', 'Arial', 'Helvetica'],
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+        'axes.labelsize': 8,
+        'xtick.labelsize': 8,
+        'ytick.labelsize': 8,
+        'axes.titlesize': 8,
+        'figure.titlesize': 8,
+        'axes.linewidth': 0.5,
+        'xtick.major.size': 2.5,
+        'ytick.major.size': 2.5,
+        'xtick.major.width': 0.5,
+        'ytick.major.width': 0.5,
+    })
+
+    print(f"\n--- Generating Combined Zonal Mean + Anomaly Timeline for {variable_name} ---")
     print(f"Baseline year: {baseline_year}, Target year: {target_year}")
-    
-    # 确定数据文件名
-    if variable_name == 'ML-Predicted OH':
-        baseline_fname =f'predicted_MLS_OH_density_gridded_{baseline_year}.nc'#f'calculated_SSA_OH_density_gridded_{baseline_year}.nc' #
+
+    if variable_name == 'DRCAT-Predicted OH':
+        baseline_fname = f'predicted_MLS_OH_density_gridded_{baseline_year}.nc'
         target_fname = f'predicted_MLS_OH_density_gridded_{target_year}.nc'
     elif variable_name == 'MLS OH Obs':
         baseline_fname = f'true_MLS_OH_density_gridded_{baseline_year}.nc'
@@ -387,213 +276,199 @@ def plot_zonal_mean_anomaly_timeline(variable_name, start_day, end_day, step_day
     else:
         print(f"Unknown variable name: {variable_name}")
         return
-    
-    # 加载基准年和目标年数据
+
     try:
         baseline_ds = xr.open_dataset(os.path.join(OUTPUT_DIR, baseline_fname))
         target_ds = xr.open_dataset(os.path.join(OUTPUT_DIR, target_fname))
-        var_name1 = list(baseline_ds.data_vars)[0]
-        var_name2 = list(target_ds.data_vars)[0]
-
     except FileNotFoundError as e:
         print(f"Could not load data: {e}")
         return
     
-    # 设置压力层范围
+    # convert units to 10^6 cm^-3
+    baseline_ds = baseline_ds / 1e6
+    target_ds = target_ds / 1e6
+
+    var_name_baseline = list(baseline_ds.data_vars)[0]
+    var_name_target = list(target_ds.data_vars)[0]
+
     plev_min = 0.9
     plev_max = 33
-    
-    # 生成时间序列
-    days = range(start_day, end_day + 1, step_days)
+    days = list(range(start_day, end_day + 1, step_days))
     n_days = len(days)
-    
-    # 创建子图
-    fig, axes = plt.subplots(nrows=n_days, ncols=1, figsize=(fig_w, fig_h*n_days), sharex=True, sharey=True)
-    if n_days == 1:
-        axes = [axes]
-    
-    # fig.suptitle(f'{variable_name} Global Zonal Mean Anomaly Timeline\n({target_year} - {baseline_year})', fontsize=16)
-    
-    # 收集所有异常值数据用于确定颜色范围
-    all_anomalies = []
+
+    mean_data_by_day = {}
+    anomaly_data_by_day = {}
+    all_mean = []
+    all_anomaly = []
+
     for day in days:
         try:
-            # 获取基准年数据
-            baseline_daily = baseline_ds[var_name1].sel(doy=day, method="nearest")
-            baseline_daily = baseline_daily.sel(pressure=slice(plev_min, plev_max))
+            baseline_daily = baseline_ds[var_name_baseline].sel(doy=day, method='nearest').sel(pressure=slice(plev_min, plev_max))
+            target_daily = target_ds[var_name_target].sel(doy=day, method='nearest').sel(pressure=slice(plev_min, plev_max))
+
             baseline_zonal = baseline_daily.mean(dim='lon', skipna=True)
-            
-            # 获取目标年数据
-            target_daily = target_ds[var_name2].sel(doy=day, method="nearest")
-            target_daily = target_daily.sel(pressure=slice(plev_min, plev_max))
             target_zonal = target_daily.mean(dim='lon', skipna=True)
-            
-            # 计算异常值
-            anomaly = (target_zonal - baseline_zonal)/ baseline_zonal*100  # 计算百分比异常
-            all_anomalies.append(anomaly)
+            anomaly = xr.where(baseline_zonal != 0, (target_zonal - baseline_zonal) / baseline_zonal * 100, np.nan)
+
+            mean_data_by_day[day] = target_zonal
+            anomaly_data_by_day[day] = anomaly
+            all_mean.append(target_zonal)
+            all_anomaly.append(anomaly)
         except (IndexError, KeyError):
             continue
-    
-    if not all_anomalies:
-        print("No anomaly data available to plot.")
+
+    if not all_mean:
+        print('No valid mean/anomaly data available to plot.')
+        baseline_ds.close()
+        target_ds.close()
         return
-    
-    # 确定颜色范围
-    # max_anomaly = max(d.max() for d in all_anomalies)
-    # min_anomaly = min(d.min() for d in all_anomalies)
-    # abs_max = max(abs(max_anomaly), abs(min_anomaly))
-    abs_max = 150  # 设置异常值的最大绝对值范围为100%
 
-    # 绘制每个时间点的异常值图
+    mean_max = max(float(np.nanmax(d.values)) for d in all_mean)
+    mean_min = min(float(np.nanmin(d.values)) for d in all_mean)
+    if not np.isfinite(mean_min) or not np.isfinite(mean_max):
+        mean_min, mean_max = 0.0, 1.0
+
+    fig_h = max(2.2, row_h * n_days + 0.55)
+    fig, axes = plt.subplots(
+        nrows=n_days,
+        ncols=2,
+        figsize=(fig_w, fig_h),
+        sharex=True,
+        sharey=True,
+
+    )
+    fig.subplots_adjust(
+        left=left_margin,
+        right=right_margin,
+        top=top_margin,
+        bottom=bottom_margin,
+        hspace=hspace,
+        wspace=wspace,
+    )
+    
+
+    if n_days == 1:
+        axes = np.array([axes])
+
+    pcm_mean = None
+    pcm_anom = None
+
     for i, day in enumerate(days):
-        try:
-            # 获取基准年数据
-            baseline_daily = baseline_ds[var_name1].sel(doy=day, method="nearest")
-            baseline_daily = baseline_daily.sel(pressure=slice(plev_min, plev_max))
-            baseline_zonal = baseline_daily.mean(dim='lon', skipna=True)
-            
-            # 获取目标年数据
-            target_daily = target_ds[var_name2].sel(doy=day, method="nearest")
-            target_daily = target_daily.sel(pressure=slice(plev_min, plev_max))
-            target_zonal = target_daily.mean(dim='lon', skipna=True)
-            
-            # 计算异常值
-            anomaly = (target_zonal - baseline_zonal)/ baseline_zonal*100  # 计算百分比异常
-            
-            # 绘制异常值
-            anomaly.plot.pcolormesh(ax=axes[i], x='lat', y='pressure', 
-                                  cmap=fig_cmap, vmin=-abs_max, vmax=abs_max,
-                                  cbar_kwargs={'label': 'Anomaly (molec cm⁻³)'})
-            # --- 这是关键修改 ---
-            # 2. 将 'day' (一年中的第几天) 和 'year' 转换为日期对象
-            date_obj = datetime.strptime(f'{target_year} {day}', '%Y %j')
-            
-            # 3. 格式化日期字符串 (例如: "January 10")
-            #    使用 .day 而不是 %d 来避免日期的前导零 (例如 "January 1" 而不是 "January 01")
-            date_str = f"{date_obj.strftime('%B')} {date_obj.day}"
-            
-            # 4. 设置新的标题
-            axes[i].set_title(f'Day {day} ({date_str})')
+        ax_mean = axes[i, 0]
+        ax_anom = axes[i, 1]
 
-            axes[i].set_yscale('log')
-            axes[i].invert_yaxis()
-            if i == len(axes) - 1:  # 最后一个子图
-                axes[i].set_xlabel('Latitude')
-            axes[i].set_ylabel('Pressure (hPa)')
-        except (IndexError, KeyError):
-            axes[i].text(0.5, 0.5, f'No data for Day {day}', 
-                        ha='center', va='center', transform=axes[i].transAxes)
+        if day not in mean_data_by_day:
+            ax_mean.text(0.5, 0.5, f'No data for Day {day}', ha='center', va='center', transform=ax_mean.transAxes)
+            ax_anom.text(0.5, 0.5, f'No data for Day {day}', ha='center', va='center', transform=ax_anom.transAxes)
+            continue
+
+        target_zonal = mean_data_by_day[day]
+        anomaly = anomaly_data_by_day[day]
+
+        pcm_mean = target_zonal.plot.pcolormesh(
+            ax=ax_mean,
+            x='lat',
+            y='pressure',
+            cmap=cmap_mean,
+            vmin=mean_min,
+            vmax=mean_max,
+            add_colorbar=False,
+        )
+        pcm_anom = anomaly.plot.pcolormesh(
+            ax=ax_anom,
+            x='lat',
+            y='pressure',
+            cmap=cmap_anomaly,
+            vmin=-anomaly_abs_max,
+            vmax=anomaly_abs_max,
+            add_colorbar=False,
+        )
+
+        date_obj = datetime.strptime(f'{target_year} {day}', '%Y %j')
+        date_str = f"{date_obj.strftime('%B')} {date_obj.day}"
+
+        ax_mean.set_yscale('log')
+        ax_anom.set_yscale('log')
+        ax_mean.invert_yaxis()
+        # ax_anom.invert_yaxis()
     
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, f'{variable_name.replace(" ", "_")}_anomaly_timeline_{target_year}-{baseline_year}_day{start_day}-{end_day}.png'), dpi=300)
+        ax_mean.set_title(f'Day {day} ({date_str})')
+        ax_anom.set_title(f'Day {day} ({date_str})')
+
+        ax_mean.set_ylabel('Pressure (hPa)', fontsize=font_settings['label'])
+        ax_anom.set_ylabel('')
+        ax_anom.tick_params(axis='y', labelleft=False)
+        
+
+        if i == n_days - 1:
+            ax_mean.set_xlabel(r'Latitude (°N)', fontsize=font_settings['label'])
+            ax_anom.set_xlabel(r'Latitude (°N)', fontsize=font_settings['label'])
+        else:
+            ax_mean.set_xlabel('')
+            ax_anom.set_xlabel('')
+
+        ax_mean.tick_params(axis='both', labelsize=font_settings['ticks'])
+        ax_anom.tick_params(axis='both', labelsize=font_settings['ticks'])
+
+        if i == 0:
+            ax_mean.text(0.02, 1.16, 'OH Mean', transform=ax_mean.transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+            ax_anom.text(0.02, 1.16, 'OH Anomaly', transform=ax_anom.transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
+    if pcm_mean is not None:
+        left_pos = axes[-1, 0].get_position()
+        cax_mean = fig.add_axes([
+            left_pos.x0,
+            bottom_margin - cbar_gap,
+            left_pos.width,
+            cbar_height,
+        ])
+        cbar_mean = fig.colorbar(
+            pcm_mean,
+            cax=cax_mean,
+            orientation='horizontal',
+        )
+        cbar_mean.set_label(r'Density (10$^{6}$ cm$^{-3}$)', fontsize=font_settings['cbar_label'])
+        cbar_mean.ax.tick_params(labelsize=font_settings['ticks'])
+
+    if pcm_anom is not None:
+        right_pos = axes[-1, 1].get_position()
+        cax_anom = fig.add_axes([
+            right_pos.x0,
+            bottom_margin - cbar_gap,
+            right_pos.width,
+            cbar_height,
+        ])
+        cbar_anom = fig.colorbar(
+            pcm_anom,
+            cax=cax_anom,
+            orientation='horizontal',
+        )
+        cbar_anom.set_label('Relative Anomaly (%)', fontsize=font_settings['cbar_label'])
+        cbar_anom.ax.tick_params(labelsize=font_settings['ticks'])
+
+    # plt.tight_layout()
+
+    out_name = f"{variable_name.replace(' ', '_')}_mean_anomaly_timeline_{target_year}-{baseline_year}_day{start_day}-{end_day}.pdf"
+    out_path = os.path.join(plot_dir, out_name)
+    plt.savefig(out_path, dpi=600)
     plt.close(fig)
-    print(f"✅ Saved anomaly timeline plot for {variable_name}.")
 
-
-
-def plot_temporal_trends(years, p_levels_to_plot, OUTPUT_DIR, plot_dir):
-    print("\n--- Generating Temporal Trend Plots ---")
-    all_monthly_means = []
-    data_vars = {
-        'MLS OH Obs': 'true_MLS_OH_density',
-        'ML-Predicted OH': 'predicted_MLS_OH_density',
-        'Calculated SSA-OH': 'calculated_SSA_OH_density',
-    }
-
-    for year in tqdm(years, desc="Processing years for temporal plots"):
-        for p_level in p_levels_to_plot:
-            for var_title, var_name in data_vars.items():
-                try:
-                    ds = xr.open_dataset(os.path.join(OUTPUT_DIR, f'{var_name}_gridded_{year}.nc'))
-                    mean_data = ds[var_name].sel(pressure=p_level, method='nearest').mean(dim=['lat', 'lon']).to_dataframe(name='val').reset_index()
-                    mean_data['Variable'] = var_title
-                    mean_data['Pressure'] = p_level
-                    mean_data['Year'] = year
-                    mean_data['Date'] = pd.to_datetime(mean_data['Year'].astype(str) + '-' + mean_data['doy'].astype(str), format='%Y-%j')
-                    all_monthly_means.append(mean_data)
-                except (FileNotFoundError, IndexError):
-                    continue
-
-    if not all_monthly_means:
-        print("No data processed for temporal trends."); return
-
-    final_df = pd.concat(all_monthly_means).reset_index(drop=True)
-
-    def reindex_group(df):
-        df = df.set_index('Date')
-        if df.empty:
-            return None
-        df_resampled = df.resample('M').mean()
-        full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq='M')
-        df_reindexed = df_resampled.reindex(full_range)
-        df_reindexed.index.name = 'Date'
-        return df_reindexed
-
-    final_df_monthly = final_df.groupby(['Variable', 'Pressure']).apply(reindex_group).reset_index()
-
-    g = sns.FacetGrid(final_df_monthly, col="Pressure", col_wrap=1, hue="Variable",
-                      height=4, aspect=5, sharey=False, col_order=sorted(p_levels_to_plot))
-
-    g.map(plt.plot, "Date", "val", marker='o', linestyle='-', markersize=2, alpha=0.8)
-
-    g.add_legend().set_axis_labels("Year", "Monthly Mean OH Density (molec/cm³)")
-    g.set_titles("Pressure Level: {col_name} hPa").fig.suptitle('Global Monthly Mean OH Concentration Time Series', y=1.02)
-    plt.tight_layout()
-    plt.savefig(os.path.join(plot_dir, 'temporal_trends_matplotlib_fix.png'), dpi=300)
-    plt.close('all')
-    print("✅ 已使用Matplotlib直接绘图并保存。")
-
-        # --- 2. 新增：绘制所有压力层总和的图 ---
-    print("\n正在绘制所有压力层总和的趋势图...")
-    
-    # 按日期和变量对月度数据进行分组，并对'val'（OH浓度）求和
-    # 这会得到每个时间点上，所有压力层的OH浓度总和
-    total_oh_df = final_df_monthly.groupby(['Date', 'Variable'])['val'].sum(min_count=1).reset_index()
-
-    plt.figure(figsize=(20, 7))
-    for var in total_oh_df['Variable'].unique():
-        df_var = total_oh_df[total_oh_df['Variable'] == var]
-        plt.plot(df_var['Date'], df_var['val'], marker='o', linestyle='-', markersize=4, alpha=0.8, label=var)
-
-    plt.title('Global Monthly Mean OH Concentration Time Series', fontsize=16, y=1.02)
-    plt.xlabel("Year", fontsize=12)
-    plt.ylabel("Monthly Mean OH Density (molec/cm³)", fontsize=12) # 单位已更改，因为是柱浓度
-    plt.legend(title='Type')
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.tight_layout()
-
-    # 保存总和图
-    output_path_total_sum = os.path.join(plot_dir, 'temporal_trends_total_sum.png')
-    plt.savefig(output_path_total_sum, dpi=300)
-    plt.close('all')
-    print(f"✅ 所有压力层总和的图已保存至: {output_path_total_sum}")
+    baseline_ds.close()
+    target_ds.close()
+    print(f"Saved combined mean+anomaly timeline plot for {variable_name}: {out_path}")
 
 
 def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
     """
-    以科研出版风格生成纬向平均OH浓度对比图 (V2 - 紧凑布局)。
-
-    主要改进:
-    - 将评估指标格式化为紧凑的多列布局。
-    - 调整图表和子图间距，减少多余空白，使整体更紧凑。
-    - 使用等宽字体确保指标列对齐。
+    生成纬向平均OH浓度对比图
     """
-    print(f"\n--- 正在为 {year} 年, 第 {day_of_year} 天生成科研风格对比图 (紧凑布局) ---")
-     # --- 字体加载部分保持不变 ---
-    font_dir = 'fonts'
-    if os.path.exists(font_dir):
-        print(f"正在从 '{font_dir}' 加载本地字体...")
-        for font_file in fm.findSystemFonts(fontpaths=[font_dir]):
-            fm.fontManager.addfont(font_file)
-        print("本地字体加载完成。")
-    else:
-        print(f"警告: 本地字体文件夹 '{font_dir}' 不存在，将使用系统默认字体。")
+    print(f"\n--- 正在为 {year} 年, 第 {day_of_year} 天生成对比图---")
 
-    # --- 1. 数据加载 --- (此部分不变)
+    # --- 1. 数据加载 --- 
     data_sources = {
         'ML-Predicted OH': f'predicted_MLS_OH_density_gridded_{year}.nc',
         'Calculated SSA-OH': f'calculated_SSA_OH_density_gridded_{year}.nc',
-        'Predicted SSA-OH': f'predicted_SSA_OH_density_gridded_{year}.nc',
+        # 'Predicted SSA-OH': f'predicted_SSA_OH_density_gridded_{year}.nc',
     }
     loaded_data = {}
     for title, fname in data_sources.items():
@@ -621,7 +496,7 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
     for key in loaded_data:
         loaded_data[key] = loaded_data[key] / 1e6
 
-    # --- 2. 指标计算 (修改为分列逻辑) ---
+    # --- 2. 指标计算 ---
     comparisons = {
         "Pred. MLS vs True": ('ML-Predicted OH', 'True MLS OH'),
         "Calc. SSA vs True": ('Calculated SSA-OH', 'True MLS OH'),
@@ -630,7 +505,7 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
     }
     
     comp_items = list(comparisons.items())
-    mid_point = (len(comp_items) + 1) // 2  # 计算分割点
+    mid_point = (len(comp_items) + 1) // 2 
     col1_items, col2_items = comp_items[:mid_point], comp_items[mid_point:]
     
     col1_lines, col2_lines = [], []
@@ -658,31 +533,48 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
         else: line += " Missing data"
         col2_lines.append(line)
 
-    # 格式化为单字符串，使用等宽字体对齐
     max_len_col1 = max(len(s) for s in col1_lines) if col1_lines else 0
     formatted_lines = []
     for i in range(len(col1_lines)):
         line1 = col1_lines[i]
         line2 = col2_lines[i] if i < len(col2_lines) else ""
-        # 使用 f-string 的对齐功能，并增加额外间距
         formatted_lines.append(f"{line1:<{max_len_col1}}    {line2}")
     metrics_text_aligned = "\n".join(formatted_lines)
     
-    # --- 3. 绘图风格设置 --- (此部分不变)
+
+    # 3. 绘图初始化
+    # plt.style.use('seaborn-v0_8-paper')
+    # --- Science Advances标准 ---
+    font_settings = {
+        'title': 8,
+        'label': 8,
+        'ticks': 8,
+        'legend_title':8,
+        'legend_text': 8,
+        'offset_text': 8,
+        'panel': 9,
+        'cbar_label': 7,
+    }
+    # load regular font and bold font
     font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    bold_font_path = 'Plot/fonts/MYRIADPRO-BOLD.OTF'
     if os.path.exists(font_path):
         fm.fontManager.addfont(font_path)
         # 获取加载后的字体真实名称（通常是 'Myriad Pro'）
         prop = fm.FontProperties(fname=font_path)
         myriad_font = prop.get_name()
+        if os.path.exists(bold_font_path):
+            fm.fontManager.addfont(bold_font_path)
+            myriad_bold_font = fm.FontProperties(fname=bold_font_path)
     else:
         print(f"Warning: Font file {font_path} not found. Using sans-serif.")
         myriad_font = 'Arial'
+        myriad_bold_font = fm.FontProperties(weight='bold')   
 
     plt.rcParams.update({
         'font.family': 'sans-serif', 
         'font.sans-serif': ['Myriad Pro', 'Myriad', 'Arial', 'Helvetica'], # 首选 Myriad
-        'pdf.fonttype': 42,      # 确保矢量图文字不被转为路径
+        'pdf.fonttype': 42,      
         'ps.fonttype': 42,
         'axes.labelsize': 8,     # 轴标签字号设为 8pt (期刊默认字号)
         'xtick.labelsize': 8,    # 刻度字号设为 6pt (期刊允许的最小字号)
@@ -690,13 +582,11 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
         'axes.titlesize': 8,     # 子图标题设为 8pt
         'figure.titlesize': 8,
         'axes.linewidth': 0.5,   # 线宽 0.5pt (需大于期刊规定的 0.28pt)
-        # --- 新增：调整刻度线长度和宽度 ---
         'xtick.major.size': 2.5,   # X轴主刻度线长度缩短 (默认约 3.5-4)
         'ytick.major.size': 2.5,   # Y轴主刻度线长度缩短
         'xtick.major.width': 0.5,  # 刻度线粗细与坐标轴线宽保持一致
         'ytick.major.width': 0.5,  # 刻度线粗细与坐标轴线宽保持一致
-        # 'xtick.minor.size': 0,     # 禁用次要刻度线 (符合期刊要求)
-        # 'ytick.minor.size': 0,     # 禁用次要刻度线 (符合期刊要求)
+
     })
 
     # --- 4. 绘图 ---
@@ -705,17 +595,16 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
     num_plots = len(plot_data)
     if num_plots == 0: return
 
-    # 调整画布尺寸：严格设定为双栏宽度 7.25 英寸，高度适中以保持比例
     fig, axes = plt.subplots(
         nrows=1, ncols=num_plots, 
         figsize=(7.25, 3),         # 修改为符合期刊的双栏宽 7.25 in
         sharex=True, sharey=True,
-        gridspec_kw={'bottom': 0.25} # 增加底部空间以容纳指标文本
+        gridspec_kw={'bottom': 0.2} 
     )
     if num_plots == 1: axes = [axes]
     
     vmax = loaded_data['True MLS OH'].max()
-    cbar_label = r'OH Density (10$^{6}$ cm$^{-3}$)'
+    cbar_label = r'OH density (10$^{6}$ cm$^{-3}$)'
 
     for i, (title, data) in enumerate(plot_data.items()):
         ax = axes[i]
@@ -723,20 +612,24 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
             ax=ax, x='lat', y='pressure', cmap='turbo',
             vmin=0, vmax=25, add_colorbar=False
         )
-        ax.set_title(title, pad=3)
+        if title == 'True MLS OH':
+            ax.set_title('MLS OH', pad=3)
+        else:
+            ax.set_title(title, pad=3)
         ax.set_xlabel(''); ax.set_ylabel('')
-        
+        labels=['A', 'B', 'C', 'D']
+        ax.text(0.02, 1.06, labels[i], transform=ax.transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
+
         # 添加指标到对比子图下方
         if title != 'True MLS OH':
             metrics = _calculate_metrics(loaded_data['True MLS OH'].values, data.values)
             if metrics:
                 metric_str = f"RMSE: {metrics['rmse']:.2f}  R²: {metrics['r2']:.3f}  SSIM: {metrics['ssim']:.3f}"
-                # 字体大小修改为 6pt，以适应狭窄的子图宽度
-                ax.text(0.5, -0.22, metric_str, ha='center', va='top', transform=ax.transAxes, fontsize=7)
+                ax.text(0.5, -0.2, metric_str, ha='center', va='top', transform=ax.transAxes, fontsize=7)
                 
-    # --- 5. 布局与美化 ---
     # 修改全局坐标轴标签字体大小为 8pt
-    fig.supxlabel('Latitude (°N)', fontsize=8, y=0.14)
+    fig.supxlabel('Latitude (°N)', fontsize=8, y=0.08)
     fig.supylabel('Pressure (hPa)', fontsize=8, x=0.02,y=0.6)
     
     axes[0].set_yscale('log')
@@ -745,11 +638,9 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
     min_p = true_data.pressure.min().values
     axes[0].set_ylim(max_p, min_p)  
 
-    # 调整整体布局比例，避免空白浪费
     fig.subplots_adjust(left=0.08, right=0.9, top=0.95, bottom=0.25, wspace=0.095)
-    # fig.tight_layout(rect=[0, 0.02, 1, 0.95])
+    # fig.tight_layout(rect=[0, 0.05, 1, 0.95])
 
-    # 调整 Colorbar 宽度和位置
     cbar_ax = fig.add_axes([0.915, 0.25, 0.012, 0.7])
     cbar = fig.colorbar(pcm, cax=cbar_ax)
     cbar.set_label(cbar_label, size=8)
@@ -767,103 +658,16 @@ def plot_zonal_mean_comparison_sci(year, day_of_year, plot_dir, output_dir):
     #     fontsize=6, color='grey', alpha=0.7 # 字体修改为 6pt
     # )
 
-    # 保存图片：建议后缀同时改为 .pdf 以生成矢量图
+    # 保存图片
     plot_path = os.path.join(plot_dir, f'Figure2_zonal_mean_comparison_{year}_day{day_of_year}_sci_compact.pdf')
-    plt.savefig(plot_path, dpi=400)
+    plt.savefig(plot_path, dpi=600)
     plt.close(fig)
-    print(f"✅ 已保存科研风格对比图 (紧凑布局): {plot_path}")
-
-    # plt.style.use('seaborn-v0_8-paper')
-    # plt.rcParams.update({
-    #     'font.family': 'sans-serif', 'font.sans-serif': [myriad_font, 'Arial', 'Helvetica'],
-    #     'axes.labelsize': 14, 'xtick.labelsize': 12, 'ytick.labelsize': 12,
-    #     'axes.titlesize': 12, 'figure.titlesize': 12, 'axes.linewidth': 1.2,
-    # })
-
-    # # --- 4. 绘图 --- (此部分不变)
-    # plot_order = ['True MLS OH', 'ML-Predicted OH', 'Calculated SSA-OH', 'TOMCAT OH']
-    # plot_data = {k: loaded_data[k] for k in plot_order if k in loaded_data}
-    # num_plots = len(plot_data)
-    # if num_plots == 0: return
-
-    # # 调整画布高度以实现紧凑布局
-    # fig, axes = plt.subplots(
-    #     nrows=1, ncols=num_plots, 
-    #     figsize=(5 * num_plots, 6.5), # 减小了高度
-    #     sharex=True, sharey=True,
-    #     gridspec_kw={'bottom': 0.1}  # 增加底部空间以容纳文本
-    # )
-    # if num_plots == 1: axes = [axes]
-    
-    # vmax = loaded_data['True MLS OH'].max()
-    # cbar_label = r'OH Density (10$^{6}$ cm$^{-3}$)'
-
-    # for i, (title, data) in enumerate(plot_data.items()):
-    #     ax = axes[i]
-    #     pcm = data.plot.pcolormesh(
-    #         ax=ax, x='lat', y='pressure', cmap='turbo',
-    #         vmin=0, vmax=25, add_colorbar=False
-    #     )
-    #     ax.set_title(title)
-    #     ax.set_xlabel(''); ax.set_ylabel('')
-    #     # 添加指标到对比子图下方（vs True）
-    #     if title != 'True MLS OH':
-    #         metrics = _calculate_metrics(loaded_data['True MLS OH'].values, data.values)
-    #         if metrics:
-    #             metric_str = f"RMSE: {metrics['rmse']:.2f}  R²: {metrics['r2']:.3f}  SSIM: {metrics['ssim']:.3f}"
-    #             ax.text(0.5, -0.14, metric_str, ha='center', va='top', transform=ax.transAxes, fontsize=11)
-    # # --- 5. 布局与美化 (修改部分) ---
-    # fig.supxlabel('Latitude (°N)', fontsize=14, y=0.02)
-    # fig.supylabel('Pressure (hPa)', fontsize=14, x=0.06)
-    
-    # axes[0].set_yscale('log')
-    # # axes[0].invert_yaxis()
-    # # 修正y轴范围：使用True MLS OH的精确压力范围，避免自动扩展
-    # true_data = loaded_data['True MLS OH']
-    # max_p = true_data.pressure.max().values
-    # min_p = true_data.pressure.min().values
-    # axes[0].set_ylim(max_p, min_p)  # 设置为max到min以反转轴，无需invert_yaxis()
-
-    # # 调整布局以适应更紧凑的文本框
-    # fig.subplots_adjust(left=0.09, right=0.86, top=0.85, bottom=0.28)
-    
-    # cbar_ax = fig.add_axes([0.88, 0.1, 0.015, 0.75])
-    # fig.colorbar(pcm, cax=cbar_ax, label=cbar_label)
-    # # adjust colorbar limits
-    # # pcm.set_clim(0, 30)
-
-    # # --- MODIFICATION: 添加日期文本 ---
-    # data_date_obj = datetime.strptime(f'{year}-{day_of_year}', '%Y-%j')
-    # formatted_date = data_date_obj.strftime('%d %b %Y')    
-    # fig.text(
-    #     0.9, 0.9,
-    #     f'Date: {formatted_date}', 
-    #     ha='right', va='bottom',
-    #     fontsize=11, color='grey', alpha=0.5
-    # )
-    # # 添加指标文本框 (新布局)
-    # # a. 添加标题
-    # # fig.text(0.5, 0.18, "Evaluation Metrics", ha="center", va="bottom", fontsize=14, weight='bold')
-    
-    # # b. 添加对齐后的指标
-    # # fig.text(0.5, 0, metrics_text_aligned,
-    # #          ha="center", va="top",
-    # #          fontsize=10,  # 使用稍小的字号
-    # #          fontfamily='monospace',  # 使用等宽字体确保对齐
-    # #          )
-
-    # # fig.suptitle(f'Zonal Mean OH Comparison - {year}, Day {day_of_year}', fontsize=18)
-    
-    # plot_path = os.path.join(plot_dir, f'zonal_mean_comparison_{year}_day{day_of_year}_sci_compact.png')
-    # plt.savefig(plot_path, dpi=400, bbox_inches='tight')
-    # plt.close(fig)
-    # print(f"✅ 已保存科研风格对比图 (紧凑布局): {plot_path}")
+    print(f"已保存对比图: {plot_path}")
 
 
 def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
     """
-    以科研出版风格生成纬向平均OH浓度差异图。
-    
+    生成纬向平均OH浓度差异图。
     绘制4列：
     - 第1列：MLS Obs OH（绝对值）
     - 第2列：DRCAT predicted OH - MLS Obs OH
@@ -872,21 +676,12 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
     """
     print(f"\n--- 正在为 {year} 年, 第 {day_of_year} 天生成差异对比图 ---")
     
-    # --- 字体加载部分 ---
-    font_dir = 'fonts'
-    if os.path.exists(font_dir):
-        print(f"正在从 '{font_dir}' 加载本地字体...")
-        for font_file in fm.findSystemFonts(fontpaths=[font_dir]):
-            fm.fontManager.addfont(font_file)
-        print("本地字体加载完成。")
-    else:
-        print(f"警告: 本地字体文件夹 '{font_dir}' 不存在，将使用系统默认字体。")
 
     # --- 1. 数据加载 ---
     data_sources = {
         'ML-Predicted OH': f'predicted_MLS_OH_density_gridded_{year}.nc',
         'Calculated SSA-OH': f'calculated_SSA_OH_density_gridded_{year}.nc',
-        'Predicted SSA-OH': f'predicted_SSA_OH_density_gridded_{year}.nc',
+        # 'Predicted SSA-OH': f'predicted_SSA_OH_density_gridded_{year}.nc',
     }
     loaded_data = {}
     for title, fname in data_sources.items():
@@ -917,7 +712,7 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
     # --- 2. 计算差异数据 ---
     true_mls = loaded_data['True MLS OH']
     differences = {}
-    plot_titles = ['True MLS OH']
+    plot_titles = ['MLS OH']
     plot_data_list = [true_mls]
     
     # DRCAT 差异
@@ -925,35 +720,54 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
         diff = loaded_data['ML-Predicted OH'] - true_mls
         differences['DRCAT predicted'] = diff
         plot_data_list.append(diff)
-        plot_titles.append('DRCAT Predicted − MLS Obs')
+        plot_titles.append('DRCAT − MLS OH')
     
     # SSA 差异
     if 'Calculated SSA-OH' in loaded_data:
         diff = loaded_data['Calculated SSA-OH'] - true_mls
         differences['SSA'] = diff
         plot_data_list.append(diff)
-        plot_titles.append('SSA − MLS Obs')
+        plot_titles.append('SSA − MLS OH')
     
     # TOMCAT 差异
     if 'TOMCAT OH' in loaded_data:
         diff = loaded_data['TOMCAT OH'] - true_mls
         differences['TOMCAT'] = diff
         plot_data_list.append(diff)
-        plot_titles.append('TOMCAT − MLS Obs')
+        plot_titles.append('TOMCAT − MLS OH')
 
     if len(plot_data_list) < 2:
         print("错误: 无足够数据绘制差异图。已跳过绘图。")
         return
 
-    # --- 3. 绘图风格设置 ---
+
+    # 3. 绘图初始化
+    # --- Science Advances标准 ---
+    font_settings = {
+        'title': 8,
+        'label': 8,
+        'ticks': 8,
+        'legend_title':8,
+        'legend_text': 8,
+        'offset_text': 8,
+        'panel': 9,
+        'cbar_label': 7,
+    }
+    # load regular font and bold font
     font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    bold_font_path = 'Plot/fonts/MYRIADPRO-BOLD.OTF'
     if os.path.exists(font_path):
         fm.fontManager.addfont(font_path)
+        # 获取加载后的字体真实名称（通常是 'Myriad Pro'）
         prop = fm.FontProperties(fname=font_path)
         myriad_font = prop.get_name()
+        if os.path.exists(bold_font_path):
+            fm.fontManager.addfont(bold_font_path)
+            myriad_bold_font = fm.FontProperties(fname=bold_font_path)
     else:
         print(f"Warning: Font file {font_path} not found. Using sans-serif.")
         myriad_font = 'Arial'
+        myriad_bold_font = fm.FontProperties(weight='bold')   
 
     plt.rcParams.update({
         'font.family': 'sans-serif', 
@@ -975,7 +789,6 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
     # --- 4. 绘图 ---
     num_plots = len(plot_data_list)
     
-    # 主图用标准 subplots，右侧通过 subplots_adjust 预留空间给两个 colorbar
     fig, axes = plt.subplots(
         nrows=1,
         ncols=num_plots,
@@ -989,27 +802,26 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
     pcm_abs = None  # 存储第一个子图的 pcm
     pcm_diff = None  # 存储差异子图的 pcm
     
-    # 首先获取真实数据的y轴范围，确保所有子图y轴一致
     true_data = loaded_data['True MLS OH']
     max_p = true_data.pressure.max().values
     min_p = true_data.pressure.min().values
     
     for i, (ax, title, data) in enumerate(zip(axes, plot_titles, plot_data_list)):
+        labels = ['A', 'B', 'C', 'D']
+        ax.text(0.02, 1.06, labels[i], transform=ax.transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
         if i == 0:
-            # 第一列：绝对值，使用 turbo 色彩
             pcm_abs = data.plot.pcolormesh(
                 ax=ax, x='lat', y='pressure', cmap='turbo',
                 vmin=0, vmax=25, add_colorbar=False
             )
             ax.set_title(title, pad=3)
-            # 第一列显示y轴标签和刻度
             ax.set_ylabel('Pressure (hPa)', fontsize=8)
             yticks = [1, 10, 30, 100]
             ax.set_yticks(yticks)
             ax.yaxis.set_major_formatter(FuncFormatter(log_sci_formatter))
         else:
-            # 后续列：差异，使用 RdBu_r 色彩映射（红-白-蓝）
-            # 计算差异的合理范围
+
             diff_max = max(abs(data.min()), abs(data.max()))
             if np.isnan(diff_max) or diff_max == 0:
                 diff_max = 5
@@ -1019,23 +831,19 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
                 vmin=-diff_max, vmax=diff_max, add_colorbar=False
             )
             ax.set_title(title, pad=3)
-            # 后续列不显示y轴标签和刻度标签
+            
             ax.set_ylabel('')
             ax.tick_params(axis='y', labelleft=False)
         
         ax.set_xlabel('')
         
-        # 为所有axes设置相同的y轴scale和范围
         ax.set_yscale('log')
         ax.set_ylim(max_p, min_p)
 
-    # --- 5. 布局与美化 ---
     fig.supxlabel('Latitude (°N)', fontsize=8, y=0.03)
 
-    # 右侧预留约 0.30 的图窗宽度用于两个独立 colorbar
     fig.subplots_adjust(left=0.08, right=0.85, top=0.92, bottom=0.15, wspace=0.08)
 
-    # 为第一个子图（MLS Obs OH）添加独立 Colorbar（使用 add_axes）
     if pcm_abs is not None:
         cbar_ax_abs = fig.add_axes([0.865, 0.15, 0.01, 0.77])
         cbar_abs = fig.colorbar(pcm_abs, cax=cbar_ax_abs)
@@ -1043,7 +851,6 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
                           size=7, labelpad=3)
         cbar_abs.ax.tick_params(labelsize=7)
     
-    # 为差异子图添加 Colorbar（使用 add_axes）
     if pcm_diff is not None:
         cbar_ax_diff = fig.add_axes([0.93, 0.15, 0.01, 0.77])
         cbar_diff = fig.colorbar(pcm_diff, cax=cbar_ax_diff)
@@ -1055,23 +862,13 @@ def plot_zonal_mean_difference_sci(year, day_of_year, plot_dir, output_dir):
     plot_path = os.path.join(plot_dir, f'Figure2_Supp_zonal_mean_difference_{year}_day{day_of_year}_sci_compact.pdf')
     plt.savefig(plot_path, dpi=600)
     plt.close(fig)
-    print(f"✅ 已保存差异对比图: {plot_path}")
+    print(f"已保存差异对比图: {plot_path}")
 
 
 def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
     """
-    生成一个紧凑的"四合一"误差分析图，现在包括 TOMCAT OH 的分析。
+    生成一个误差分析图表，比较ML预测的OH、SSA计算的OH和TOMCAT OH与真实MLS OH之间的误差指标（RMSE、R²、SSIM）。
     """
-    # --- 字体加载部分保持不变 ---
-    font_dir = 'fonts'
-    if os.path.exists(font_dir):
-        print(f"正在从 '{font_dir}' 加载本地字体...")
-        for font_file in fm.findSystemFonts(fontpaths=[font_dir]):
-            fm.fontManager.addfont(font_file)
-        print("本地字体加载完成。")
-    else:
-        print(f"警告: 本地字体文件夹 '{font_dir}' 不存在，将使用系统默认字体。")
-
     print(f"\n--- 开始为 {years} 年进行综合误差分析 (包含TOMCAT OH) ---")
     
     daily_metrics = []
@@ -1092,7 +889,6 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
             ds_calc[calc_var] = ds_calc[calc_var] / 1e6
             ds_tomcat[tomcat_var] = ds_tomcat[tomcat_var] / 1e6 
 
-            # --- 更新共同日期的计算 ---
             common_days = np.intersect1d(ds_true.doy.values, ds_pred.doy.values)
             common_days = np.intersect1d(common_days, ds_calc.doy.values)
             common_days = np.intersect1d(common_days, ds_tomcat.doy.values) # <-- 新增
@@ -1118,15 +914,7 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
                     daily_metrics.append({'date': date, 'month': date.month, **metrics_calc, 'type': 'Calculated SSA-OH'})
                 if not np.isnan(metrics_tomcat['rmse']):
                     daily_metrics.append({'date': date, 'month': date.month, **metrics_tomcat, 'type': 'TOMCAT OH'}) # <-- 新增
-                # --- 3. 计算每个压力层上的指标 (新增TOMCAT) ---
-                # debug only for first
-                # if year == years[0] and doy == common_days[0]:
-                #     print(f"Debug: {year} Day {doy} - Pressure levels: {pressure_levels}")
-                #     #print true_zonal pressure
-                #     print(f"True zonal pressure levels: {true_zonal.pressure.values}")  
-                #     print(f"Pred zonal pressure levels: {pred_zonal.pressure.values}")
-                #     print(f"Calc zonal pressure levels: {calc_zonal.pressure.values}")
-                #     print(f"TOMCAT zonal pressure levels: {tomcat_zonal.pressure.values}") # <-- 新增            
+      
                 for p_level in pressure_levels:
                     true_at_p = true_zonal.sel(pressure=p_level,method='nearest').values
                     pred_at_p = pred_zonal.sel(pressure=p_level,method='nearest').values
@@ -1157,7 +945,6 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
     df_daily = pd.DataFrame(daily_metrics)
     df_pressure = pd.DataFrame(pressure_level_metrics)
     
-    # 将pressure转换为字符串，以确保作为分类变量处理所有压力水平
     df_pressure['pressure_str'] = df_pressure['pressure'].apply(lambda x: f"{float(x):.2f}")
 
     #### 绘图设置
@@ -1207,8 +994,7 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
         # 'xtick.minor.size': 0,
         # 'ytick.minor.size': 0,
     })
-    # --- 4. 绘图 (更新调色板) ---
-    # plt.rcParams.update({'font.sans-serif': ['Arial', 'Helvetica']})
+    # --- 4. 绘图 ---
     
     fig, axes = plt.subplots(2, 2, figsize=(7.25, 6.5), gridspec_kw={'height_ratios': [2, 2]})
 
@@ -1218,14 +1004,15 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
         'Calculated SSA-OH': 'darkorange',
         'TOMCAT OH': 'forestgreen'
     }
+    
 
     # --- Plot 1: RMSE Distribution ---
     sns.histplot(data=df_daily, x='rmse', hue='type', bins=200, kde=True, ax=axes[0, 0], palette=palette, stat='probability',line_kws={'linewidth':font_settings['line_width']})
     axes[0, 0].set_xlim(0.9, 4)
     axes[0, 0].set_title('Daily RMSE Distribution', fontsize=font_settings['title'])
     axes[0, 0].text(0.02, 0.95, 'A', transform=axes[0, 0].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
-    axes[0, 0].set_xlabel(r'RMSE (molec./10$^{6}$ cm$^{-3}$)', fontsize=font_settings['label'])
-    axes[0, 0].set_ylabel('Probability', fontsize=font_settings['label'])
+    axes[0, 0].set_xlabel(r'RMSE (10$^{6}$ molec. cm$^{-3}$)', fontsize=font_settings['label'])
+    axes[0, 0].set_ylabel('Normalized Counts', fontsize=font_settings['label'])
     axes[0, 0].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
     # axes[0, 0].grid(True, linestyle='--', alpha=0.6)
 
@@ -1236,7 +1023,7 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
     axes[0, 1].text(0.02, 0.95, 'B', transform=axes[0, 1].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
 
     axes[0, 1].set_xlabel(r'Coefficient of Determination ($R^2$)', fontsize=font_settings['label'])
-    axes[0, 1].set_ylabel('Frequency', fontsize=font_settings['label'])
+    axes[0, 1].set_ylabel('Normalized Counts', fontsize=font_settings['label'])
     axes[0, 1].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
     # axes[0, 1].grid(True, linestyle='--', alpha=0.6)
 
@@ -1249,16 +1036,16 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
 
     # --- Plot 3: Monthly RMSE Boxplot ---
     sns.boxplot(data=df_daily, x='month', y='rmse', hue='type', ax=axes[1, 0], palette=palette, showfliers=False, **boxplot_kwargs)
-    axes[1, 0].set_ylim(0.9, 2.75)
-    axes[1, 0].set_xlim(0.5, 12.5)
+    # axes[1, 0].set_ylim(0.9, 2.75)
+    # axes[1, 0].set_xlim(0.5, 12.5)
     axes[1, 0].set_title('Monthly RMSE Statistics', fontsize=font_settings['title'])
     axes[1, 0].text(0.02, 0.95, 'C', transform=axes[1, 0].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
 
     axes[1, 0].set_xlabel('Month', fontsize=font_settings['label'])
-    axes[1, 0].set_ylabel(r'Daily RMSE (molec./10$^{6}$ cm$^{-3})$', fontsize=font_settings['label'])
+    axes[1, 0].set_ylabel(r'Daily RMSE (10$^{6}$ molec. cm$^{-3})$', fontsize=font_settings['label'])
     # 设置月份刻度
     month_labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-    axes[1, 0].set_xticks(range(1, 13))
+    axes[1, 0].set_xticks(range(0, 12))
     axes[1, 0].set_xticklabels(month_labels)
     axes[1, 0].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
     # axes[1, 0].grid(True, axis='y', linestyle='--', alpha=0.6)
@@ -1269,22 +1056,9 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
     axes[1, 1].text(0.02, 0.95, 'D', transform=axes[1, 1].transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
 
     axes[1, 1].set_ylabel('Pressure (hPa)', fontsize=font_settings['label'])
-    axes[1, 1].set_xlabel(r'RMSE (molec./10$^{6}$ cm$^{-3}$)', fontsize=font_settings['label'])
+    axes[1, 1].set_xlabel(r'RMSE (10$^{6}$ molec. cm$^{-3}$)', fontsize=font_settings['label'])
     axes[1, 1].tick_params(axis='both', labelsize=font_settings['ticks']) # Control tick label size
 
-    # # 获取所有唯一的压力水平并排序
-    # unique_pressures = sorted(df_pressure['pressure'].unique())
-    
-    # # 为所有的压力点设置刻度位置（0到n-1）和对应的标签
-    # tick_positions = np.arange(len(unique_pressures))
-    # formatted_labels = [f"{float(p):.2f}" for p in unique_pressures]
-    
-    # # 设置y轴刻度位置和标签
-    # axes[1, 1].set_yticks(tick_positions)
-    # axes[1, 1].set_yticklabels(formatted_labels)
-
-    # axes[1, 1].invert_yaxis()
-    # axes[1, 1].grid(True, axis='x', linestyle='--', alpha=0.6)
     
     axes[0, 0].xaxis.get_offset_text().set_size(font_settings['offset_text']) # <-- New: Adjust size of '1e6'
     axes[0, 1].xaxis.get_offset_text().set_size(font_settings['offset_text']) # <-- New: Adjust size of '1e6'
@@ -1293,13 +1067,18 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
 
     # 在删除legend前先保存handles和labels
     handles, labels = axes[1, 1].get_legend_handles_labels()
-    
+    # change display labels to match the plot titles
+    label_mapping = {
+        'ML-Predicted OH': 'DRCAT OH',
+        'Calculated SSA-OH': 'SSA OH',
+        'TOMCAT OH': 'TOMCAT OH'
+    }
+    labels = [label_mapping.get(label, label) for label in labels]
     # remove legend in subplots
     for ax in axes.flat:
         if ax.get_legend():
             ax.get_legend().remove()
     
-    # 添加无边框的统一legend
     if handles and labels:
         fig.legend(handles=handles, labels=labels, loc='lower center', ncol=3,
                    bbox_to_anchor=(0.5, 0.48), fontsize=font_settings['legend_text'],
@@ -1310,21 +1089,26 @@ def plot_comprehensive_error_analysis(years, OUTPUT_DIR, plot_dir):
     plot_path = os.path.join(plot_dir, f'Figure3_comprehensive_error_analysis_{years[0]}-{years[-1]}.pdf')
     plt.savefig(plot_path, dpi=600)
     plt.close(fig)
-    print(f"✅ 已保存包含TOMCAT的综合误差分析图: {plot_path}")
+    print(f"已保存综合误差分析图: {plot_path}")
 
 
-def plot_hunga_tonga_analysis(plot_year, baseline_year, doy, plot_dir, OUTPUT_DIR, pressure_level=10.0):
+def plot_hunga_tonga_analysis_log(source, plot_year, baseline_year, doy, plot_dir, OUTPUT_DIR, pressure_level=10.0):
     """
-    绘制Hunga-Tonga火山爆发影响分析图 (V11 - 调整为3列布局，移除Raw Data图)。
+    绘制Hunga-Tonga火山爆发影响分析图 
     """
     print(f"\n--- Generating Hunga-Tonga Eruption Analysis for doy {doy} ---")
+    
+    # 局部导入以确保LogNorm可用
+    from matplotlib.colors import LogNorm
+    import matplotlib.ticker as mticker
 
     def _load_and_process_day(variable_name, year, day_of_year, output_dir):
-        # ... (此内部函数保持不变) ...
-        if variable_name == 'ML-Predicted OH':
+        if variable_name == 'DRCAT-Predicted OH':
             fname = f'predicted_MLS_OH_density_gridded_{year}.nc'
         elif variable_name.upper() == 'H2O':
             fname = f'H2O_gridded_{year}.nc'
+        elif variable_name == 'SSA OH':
+            fname = f'calculated_SSA_OH_density_gridded_{year}.nc'
         else: return None
         filepath = os.path.join(output_dir, fname)
         try:
@@ -1336,25 +1120,27 @@ def plot_hunga_tonga_analysis(plot_year, baseline_year, doy, plot_dir, OUTPUT_DI
             print(f"Info: Could not load or process file: {fname}")
             return None
 
-    #
-    title_fontsize = 10
+    title_fontsize = 6.5
+    
     # 1. 加载和计算数据
     h2o_plot_data = _load_and_process_day('H2O', plot_year, doy, Constant_var_path)*1e6 # 转换为 ppmv
     h2o_base_data = _load_and_process_day('H2O', baseline_year, doy, Constant_var_path)*1e6 # 转换为 ppmv
-    oh_plot_data = _load_and_process_day('ML-Predicted OH', plot_year, doy, OUTPUT_DIR)
-    oh_base_data = _load_and_process_day('ML-Predicted OH', baseline_year, doy, OUTPUT_DIR)
+    oh_plot_data = _load_and_process_day(source, plot_year, doy, OUTPUT_DIR)*1e-6 # 转换为 10^6 cm^-3
+    oh_base_data = _load_and_process_day(source, baseline_year, doy, OUTPUT_DIR)*1e-6 # 转换为 10^6 cm^-3
+    
     if any(data is None for data in [h2o_plot_data, h2o_base_data, oh_plot_data, oh_base_data]):
         print("Error: Missing necessary data. Aborting plot."); return
+        
     h2o_zonal_plot = h2o_plot_data.mean(dim='lon', skipna=True)
     h2o_zonal_anomaly = (h2o_zonal_plot - h2o_base_data.mean(dim='lon', skipna=True)) / h2o_base_data.mean(dim='lon', skipna=True) * 100
     oh_zonal_plot = oh_plot_data.mean(dim='lon', skipna=True)
     oh_zonal_anomaly = (oh_zonal_plot - oh_base_data.mean(dim='lon', skipna=True)) / oh_base_data.mean(dim='lon', skipna=True) * 100
     
-    # --- MODIFICATION: 只需为插值图准备数据 ---
+    # --- 准备插值图数据 ---
     oh_map_plot_raw = oh_plot_data.sel(pressure=pressure_level, method='nearest')
     h2o_map_plot_raw = h2o_plot_data.sel(pressure=pressure_level, method='nearest')
 
-    # 调用新的加权网格化函数
+    # 调用加权网格化函数
     SEARCH_FACTOR = 3.0
     lon_centers_oh, lat_centers_oh, oh_map_gridded = perform_weighted_gridding(
         data_array=oh_map_plot_raw,
@@ -1373,145 +1159,310 @@ def plot_hunga_tonga_analysis(plot_year, baseline_year, doy, plot_dir, OUTPUT_DI
         print("Error: Not enough data for weighted gridding. Aborting plot.")
         return
 
-    # 3. 绘图
+    # 3. 绘图初始化
     plt.style.use('seaborn-v0_8-paper')
-    # --- MODIFICATION: 调整画布尺寸以适应3列布局 ---
-    fig = plt.figure(figsize=(20, 9))
+    # --- Science Advances标准 ---
+    font_settings = {
+        'title': 8,
+        'label': 8,
+        'ticks': 7,
+        'legend_title':8,
+        'legend_text': 8,
+        'offset_text': 8,
+        'panel': 9,
+        'cbar_label': 7,
+    }
+    # load regular font and bold font
+    font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    bold_font_path = 'Plot/fonts/MYRIADPRO-BOLD.OTF'
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        # 获取加载后的字体真实名称（通常是 'Myriad Pro'）
+        prop = fm.FontProperties(fname=font_path)
+        myriad_font = prop.get_name()
+        if os.path.exists(bold_font_path):
+            fm.fontManager.addfont(bold_font_path)
+            myriad_bold_font = fm.FontProperties(fname=bold_font_path)
+    else:
+        print(f"Warning: Font file {font_path} not found. Using sans-serif.")
+        myriad_font = 'Arial'
+        myriad_bold_font = fm.FontProperties(weight='bold')    
 
-    # --- MODIFICATION: 调整GridSpec以适应3列布局 ---
-    # 外部网格：左侧(2列 zonal) vs 右侧(1列 map)
-    gs_outer = gridspec.GridSpec(1, 2, width_ratios=[2, 2], wspace=0.15)
 
-    # 左侧内部网格：2x2 用于 zonal plots
+    # 全局字体更新：首选 Myriad，强制使用 sans-serif，关闭次要刻度
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Myriad Pro', 'Myriad', 'Arial', 'Helvetica'],
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+        'font.size': font_settings['ticks'],
+        'axes.linewidth': 0.5,
+        'xtick.major.size': 2.5,
+        'ytick.major.size': 2.5,
+        'xtick.major.width': 0.5,
+        'ytick.major.width': 0.5,
+        'xtick.minor.size': 0.5,
+        'ytick.minor.size': 0.5,
+    })
+
+    fig = plt.figure(figsize=(7.25, 4.1))
+    fig.subplots_adjust(left=0.06, right=1, bottom=0.08, top=0.95)
+
+    # 布局设置
+    gs_outer = gridspec.GridSpec(1, 2, width_ratios=[1, 1], wspace=0.18)
     gs_left = gridspec.GridSpecFromSubplotSpec(2, 2, subplot_spec=gs_outer[0],
-                                               width_ratios=[1, 1], wspace=0.2, hspace=0.15)
-
-    # 右侧内部网格：2x1 用于 interpolated maps
+                                               width_ratios=[1, 1], wspace=0.25, hspace=0.28)
     gs_right = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_outer[1],
-                                                hspace=0.15) # 仅需行间距
+                                                hspace=0.28)
 
-    # --- MODIFICATION: 创建3列的axes ---
     axes = np.empty((2, 3), dtype=object)
-
-    # 创建左侧的子图 (第1列和第2列)
     axes[0, 0] = fig.add_subplot(gs_left[0, 0])
     axes[1, 0] = fig.add_subplot(gs_left[1, 0])
     axes[0, 1] = fig.add_subplot(gs_left[0, 1])
     axes[1, 1] = fig.add_subplot(gs_left[1, 1])
 
-    # 创建右侧的子图 (第3列)
     projection = ccrs.PlateCarree(central_longitude=180) if CARTOPY_AVAILABLE else None
     axes[0, 2] = fig.add_subplot(gs_right[0, 0], projection=projection)
     axes[1, 2] = fig.add_subplot(gs_right[1, 0], projection=projection)
     
-    # --- Col 1 & 2: Zonal Mean Plots (代码基本不变) ---
-    zonal_plot_bounds = [0, 0.05, 1, 0.9]  
+    # --- Col 1 & 2: Zonal Mean Plots ---
+    zonal_plot_bounds = [0.0, 0.03, 0.98, 0.98]
     for i in range(2):
         for j in range(2):
             parent_ax = axes[i, j]
             parent_ax.axis('off')
             ax = parent_ax.inset_axes(zonal_plot_bounds)
             divider = make_axes_locatable(ax)
-            cax_for_colorbar = divider.append_axes("right", size="5%", pad=0.1)
+            cax_for_colorbar = divider.append_axes("right", size="4.5%", pad=0.05)
             
             if j == 0 and i == 0:
                 data = h2o_zonal_plot
-                mappable = ax.pcolormesh(data.lat, data.pressure, data, cmap='turbo')
+                mappable = ax.pcolormesh(data.lat, data.pressure, data, cmap='turbo', vmin=0, vmax=18)
                 cb = fig.colorbar(mappable, cax=cax_for_colorbar)
-                cb.ax.set_title(r'H2O ppmv', fontsize=8)
-                ax.set_title(f'a) H2O Zonal Mean', fontsize=title_fontsize)
+                cb.ax.set_title(r'H2O(ppmv)', fontsize=font_settings['legend_title'], pad=3)
+                ax.set_title('H2O Zonal Mean', fontsize=title_fontsize, pad=2)
             elif j == 0 and i == 1:
                 data = h2o_zonal_anomaly
                 mappable = ax.pcolormesh(data.lat, data.pressure, data, cmap='RdBu_r', vmin=-100, vmax=100)
                 cb = fig.colorbar(mappable, cax=cax_for_colorbar)
-                cb.ax.set_title(r'    Anomaly (%)', fontsize=8)
-                ax.set_title(f'b) H2O Zonal Mean Relative Anomaly)', fontsize=title_fontsize)
+                cb.ax.set_title(r'Anomaly(%)', fontsize=font_settings['legend_title'], pad=3)
+                ax.set_title('H2O Relative Anomaly', fontsize=title_fontsize, pad=2)
             elif j == 1 and i == 0:
                 data = oh_zonal_plot
-                mappable = ax.pcolormesh(data.lat, data.pressure, data, cmap='turbo')
+                mappable = ax.pcolormesh(data.lat, data.pressure, data, cmap='turbo', vmin=0, vmax=25)
                 cb = fig.colorbar(mappable, cax=cax_for_colorbar)
-                cb.ax.set_title(r'OH density (10$^{6}$ cm$^{-3}$)', fontsize=8)
-                ax.set_title(f'c) OH Zonal Mean', fontsize=title_fontsize)
+                cb.ax.set_title(r'Density(10$^{6}$ cm$^{-3}$)', fontsize=font_settings['legend_title'], pad=3)
+                ax.set_title('OH Zonal Mean', fontsize=title_fontsize, pad=2)
             elif j == 1 and i == 1:
                 data = oh_zonal_anomaly
                 mappable = ax.pcolormesh(data.lat, data.pressure, data, cmap='RdBu_r', vmin=-100, vmax=100)
                 cb = fig.colorbar(mappable, cax=cax_for_colorbar)
-                cb.ax.set_title(r'    Anomaly (%)', fontsize=8)
-                ax.set_title(f'd) OH Zonal Mean Relative Anomaly)', fontsize=title_fontsize)  #\n({plot_year} vs {baseline_year}
-            
+                cb.ax.set_title(r'Anomaly(%)', fontsize=font_settings['legend_title'], pad=4)
+                
+                ax.set_title('OH Relative Anomaly', fontsize=title_fontsize, pad=2)
+
+            cb.ax.tick_params(labelsize=font_settings['cbar_label'],pad=1.5)
+            # set cb.ax.title font size
+            cb.ax.title.set_fontsize(6)
+
             ax.set_yscale('log')
-            # ax.invert_yaxis()
-            
             max_p = data.pressure.max().values
             min_p = data.pressure.min().values
-            ax.set_ylim(max_p, min_p)  # 设置为max到min以反转轴，无需invert_yaxis()
-            ax.set_ylabel('Pressure (hPa)' if j == 0 else '')
-            ax.set_xlabel('Latitude' if i == 1 else '')
+            ax.set_ylim(max_p, min_p)
+            ax.tick_params(axis='both', which='major', labelsize=font_settings['ticks'])
+            ax.set_xticks([-90, -45, 0, 45, 90])
+            ax.set_ylabel('Pressure (hPa)' if j == 0 else '', fontsize=font_settings['label'])
+            ax.set_xlabel('Latitude (°N)' if i == 1 else '', fontsize=font_settings['label'])
             if j == 1: plt.setp(ax.get_yticklabels(), visible=False)
 
-    # --- MODIFICATION: Col 3: Interpolated Global Maps ---
+            # add panel label
+            labels=['A','B','D','E']
+            ax.text(0.02, 1.07, labels[i*2 + j], transform=ax.transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
+            # 在 C、D 子图中添加红色圆圈，标记增强区域
+            if j == 1:
+                highlight_circle = plt.Circle(
+                    (0.42, 0.12),
+                    0.15,
+                    transform=ax.transAxes,
+                    fill=False,
+                    edgecolor='red',
+                    linewidth=1.2,
+                    zorder=8,
+                    alpha=0.5
+                )
+                ax.add_patch(highlight_circle)
+
+
+    # --- Col 3: Interpolated Global Maps ---
     ax_oh_map = axes[0, 2]
     ax_h2o_map = axes[1, 2]
 
-    # # Interpolated OH Map
-    # cf_oh = ax_oh_map.contourf(lon_grid, lat_grid, oh_map_plot_interp, levels=10, cmap='turbo', transform=ccrs.PlateCarree() if CARTOPY_AVAILABLE else None)
-    # fig.colorbar(cf_oh, ax=ax_oh_map, label=r'OH density (cm$^{-3}$)', shrink=0.9)
-    # ax_oh_map.set_title(f'Interpolated OH Global Map at {pressure_level} hPa', fontsize=title_fontsize)
+    if CARTOPY_AVAILABLE:
+        ax_oh_map.set_aspect('auto')
+        ax_h2o_map.set_aspect('auto')
 
-    # # Interpolated H2O Map
-    # cf_h2o = ax_h2o_map.contourf(lon_grid, lat_grid, h2o_map_plot_interp, levels=10, cmap='turbo', transform=ccrs.PlateCarree() if CARTOPY_AVAILABLE else None)
-    # fig.colorbar(cf_h2o, ax=ax_h2o_map, label=r'H2O ppmv', shrink=0.9)
-    # ax_h2o_map.set_title(f'Interpolated H2O Global Map at {pressure_level} hPa', fontsize=title_fontsize)
+    # 1. 设置固定范围 (避开 0，设为 1.0 到 90.0)
+    OH_MAP_VMIN = 1
+    OH_MAP_VMAX = 80.0 
+    oh_map_gridded[oh_map_gridded<OH_MAP_VMIN] = OH_MAP_VMIN  
 
-    # 注意：这里不再需要 levels 参数
-    # --- 修改点: 无需再使用 cyclic 变量，直接使用网格化函数的输出 ---
-    cf_oh = ax_oh_map.contourf(lon_centers_oh, lat_centers_oh, oh_map_gridded, cmap='YlGnBu',alpha=0.8,
-                               levels=20,
-                               transform=ccrs.PlateCarree() if CARTOPY_AVAILABLE else None)
-    fig.colorbar(cf_oh, ax=ax_oh_map, label=r'OH density (10$^{6}$ cm$^{-3}$)', shrink=0.9)
-    ax_oh_map.set_title(f'e) Interpolated OH Global Map at {pressure_level} hPa', fontsize=title_fontsize)
+    custom_oh_levels = np.logspace(np.log10(OH_MAP_VMIN), np.log10(OH_MAP_VMAX), 30)
 
-    cf_h2o = ax_h2o_map.contourf(lon_centers_h2o, lat_centers_h2o, h2o_map_gridded, cmap='YlGnBu',alpha=0.8,
-                                 levels=20,
-                                 transform=ccrs.PlateCarree() if CARTOPY_AVAILABLE else None)
-    fig.colorbar(cf_h2o, ax=ax_h2o_map, label=r'H2O ppmv', shrink=0.9)
-    ax_h2o_map.set_title(f'f) Interpolated H2O Global Map at {pressure_level} hPa', fontsize=title_fontsize)
+    # 3. 绘制 Contourf
+
+    cf_oh = ax_oh_map.contourf(
+        lon_centers_oh, lat_centers_oh, oh_map_gridded, 
+        cmap='YlGnBu', 
+        alpha=0.9,
+        norm=LogNorm(vmin=OH_MAP_VMIN, vmax=OH_MAP_VMAX), # 应用对数归一化
+        levels=custom_oh_levels,
+        extend='both', # 小于1显示深蓝，大于90显示深红
+        transform=ccrs.PlateCarree() if CARTOPY_AVAILABLE else None
+    )
+
+    # 4. 设置 Colorbar
+    cb_oh = fig.colorbar(cf_oh, ax=ax_oh_map, pad=0.02)
+    # Put the colorbar label on top instead of the side.
+    cb_oh.ax.set_title(r'Density (10$^{6}$ cm$^{-3}$)',
+                       fontsize=6, pad=4)
+    
+    target_ticks = [1, 5, 10, 20, 40,60, 80]
+    cb_oh.set_ticks(target_ticks)
+    cb_oh.set_ticklabels([str(t) for t in target_ticks])
+    cb_oh.ax.tick_params(labelsize=font_settings['cbar_label'])
+
+    ax_oh_map.set_title(f'Interpolated OH Global Map ({pressure_level} hPa)', fontsize=title_fontsize, pad=2)
+    ax_oh_map.text(0.02, 1.07, 'C', transform=ax_oh_map.transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
+    # ==========================================================================
+    # H2O Map 
+    # ==========================================================================
+    oh_map_gridded=h2o_map_gridded
+    # 1. 设置固定范围 (避开 0，设为 1.0 到 90.0)
+    OH_MAP_VMIN = 5
+    OH_MAP_VMAX = 50.0 
+    oh_map_gridded[oh_map_gridded<OH_MAP_VMIN] = OH_MAP_VMIN  # 将低于最小值的部分设为最小值，避免LogNorm报错   
+    custom_oh_levels = np.logspace(np.log10(OH_MAP_VMIN), np.log10(OH_MAP_VMAX), 30)
+
+    # 3. 绘制 Contourf
+    cf_h2o = ax_h2o_map.contourf(
+        lon_centers_h2o, lat_centers_h2o, oh_map_gridded, 
+        cmap='YlGnBu', 
+        alpha=0.9,
+        norm=LogNorm(vmin=OH_MAP_VMIN, vmax=OH_MAP_VMAX), # 应用对数归一化
+        levels=custom_oh_levels,
+        extend='both', # 小于1显示深蓝，大于90显示深红
+        transform=ccrs.PlateCarree() if CARTOPY_AVAILABLE else None
+    )
+
+    # 4. 设置 Colorbar
+    cb_h2o = fig.colorbar(cf_h2o, ax=ax_h2o_map, pad=0.02)
+    # Put the colorbar label on top instead of the side.
+    cb_h2o.ax.set_title(r'H2O (ppmv)', fontsize=6, pad=4)
 
 
+    target_ticks =  [5, 10, 20, 30,40, 50]
+    cb_h2o.set_ticks(target_ticks)
+    cb_h2o.set_ticklabels([str(t) for t in target_ticks])
+    cb_h2o.ax.tick_params(labelsize=font_settings['cbar_label'])
 
-    # --- MODIFICATION: 美化地图循环 ---
+    ax_h2o_map.set_title(f'Interpolated H2O Global Map ({pressure_level} hPa)', fontsize=title_fontsize, pad=2)
+    ax_h2o_map.text(0.02, 1.07, 'F', transform=ax_h2o_map.transAxes, fontsize=font_settings['panel'], fontproperties=myriad_bold_font, va='top', ha='left')
+
+    # 在 E、F 子图中标注火山爆发位置与羽流方向
+    eruption_lat = -20.536
+    eruption_lon = -175.382
+    map_transform = ccrs.PlateCarree() if CARTOPY_AVAILABLE else ax_oh_map.transData
+    if not CARTOPY_AVAILABLE and eruption_lon < 0:
+        eruption_lon = eruption_lon + 360.0
+
+    for idx, map_ax in enumerate([ax_oh_map, ax_h2o_map]):
+        # 火山爆发位置：红色星标 + 文本
+        map_ax.plot(
+            eruption_lon,
+            eruption_lat,
+            marker='*',
+            markersize=8,
+            color='red',
+            markeredgecolor='darkred',
+            markeredgewidth=0.4,
+            transform=map_transform,
+            zorder=9,
+            alpha=0.8,
+        )
+        if idx==1:  
+            map_ax.text(
+                eruption_lon + 3,
+                eruption_lat - 6,
+                'Eruption\nLocation',
+                color='red',
+                fontsize=7,
+                ha='left',
+                va='top',
+                transform=map_transform,
+                zorder=9,
+            )
+
+
+        arrow_lat = 20
+        arrow_x0 = 105+120
+        arrow_x1 = 168+120
+        map_ax.annotate(
+            '',
+            xy=(arrow_x1, arrow_lat),
+            xytext=(arrow_x0, arrow_lat),
+            arrowprops=dict(arrowstyle='->', color='red', lw=1.8),
+            transform=map_transform,
+            zorder=9,
+            alpha=0.2,
+        )
+        if idx==1:  
+            map_ax.text(
+                arrow_x0 ,
+                arrow_lat + 15.,
+                'Plume Drift',
+                color='red',
+                fontsize=7,
+                ha='left',
+                va='top',
+                transform=map_transform,
+                zorder=9,
+            )
+
+
+    # --- 美化---
     for i, ax in enumerate([ax_oh_map, ax_h2o_map]):
         if CARTOPY_AVAILABLE:
             ax.coastlines(color='grey')
             gl = ax.gridlines(draw_labels=True, linestyle='--', alpha=0.5)
+            gl.xlabel_style = {'size': font_settings['ticks']}
+            gl.ylabel_style = {'size': font_settings['ticks']}
             gl.top_labels = False
             gl.right_labels = False
-            # 只在最下面的地图上显示经度标签
-            if i == 0: # Top map
-                gl.bottom_labels = False
-    
-    # --- MODIFICATION: 添加日期文本 ---
-    data_date_obj = datetime.strptime(f'{plot_year}-{doy}', '%Y-%j')
-    formatted_date = data_date_obj.strftime('%d %b %Y')    
-    fig.text(
-        0.9, 0.9,
-        f'Date: {formatted_date}', 
-        ha='right', va='bottom',
-        fontsize=11, color='grey', alpha=0.5
-    )
+            # if i == 0: 
+            #     gl.bottom_labels = False
+            # add longitude x label for i==1
+            if i == 1: 
+                gl.bottom_labels = True
+                gl.xlabel_style = {'size': font_settings['ticks']}
+    ax_h2o_map.set_xlabel('Longitude', fontsize=font_settings['label'])
+
     # 5. 保存图像
-    plot_path = os.path.join(plot_dir, f'hunga_tonga_analysis_3col_{plot_year}_vs_{baseline_year}_day{doy}.png')
-    plt.savefig(plot_path, dpi=400, bbox_inches='tight')
+    plot_path = os.path.join(plot_dir, f'Figure4_hunga_tonga_analysis_3col_{source}_{plot_year}_vs_{baseline_year}_day{doy}.pdf')
+    plt.savefig(plot_path, dpi=600)
     plt.close(fig)
-    print(f"✅ Saved final Hunga-Tonga analysis plot to: {plot_path}")
+    print(f"Saved final Hunga-Tonga analysis plot to: {plot_path}")
 
 
 def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, random_seed=42, font_sizes=None):
     """
     绘制OH垂直剖面对比图。MLS观测的不确定度使用误差棒(error bars)形式展示，
-    该不确定度根据压力值直接查找内置的精度与准确度表计算。
     """
     print(f"\n--- Generating OH Profile Comparison for {year}, Day {doy} ---")
+
+    # Apply style first so later rcParams overrides stay effective.
+    plt.style.use('seaborn-v0_8-ticks')
 
     # # --- 1. 设置与数据加载 ---
     # default_font_sizes = {'title': 8, 'label': 9, 'tick': 8, 'legend': 8}
@@ -1527,16 +1478,20 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
 
     # 全局字体配置
     plt.rcParams.update({
-        'font.family': 'sans-serif',
+        'font.family': [myriad_font],
         'font.sans-serif': [myriad_font],
-        # 显式重定向 cursive，防止它去系统里乱找
         'font.cursive': [myriad_font], 
         'font.fantasy': [myriad_font],
         'font.serif': [myriad_font],
-        'pdf.fonttype': 42,  # 避免导出为轮廓，确保文字可编辑
+        'pdf.fonttype': 42,  
         'mathtext.fontset': 'custom',
         'mathtext.it': f'{myriad_font}:italic',
         'mathtext.rm': myriad_font,
+        'mathtext.bf': f'{myriad_font}:bold',
+        'mathtext.sf': myriad_font,
+        'mathtext.tt': myriad_font,
+        'mathtext.cal': myriad_font,
+        'axes.unicode_minus': False,
     })
 
     # 严格按照期刊要求的 6-8 pt 字号
@@ -1571,7 +1526,6 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
         return
 
     # --- 2. 地理位置的均匀随机采样 ---
-    # (此部分与之前版本相同)
     ref_data = loaded_data['True MLS OH']
     valid_points_stacked = ref_data.stack(points=('lat', 'lon')).dropna(dim='points', how='all')
     if len(valid_points_stacked.points) == 0:
@@ -1597,10 +1551,10 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
         loaded_data[key] = loaded_data[key] / 1e6
 
     # --- 3. 绘图 ---
-    plt.style.use('seaborn-v0_8-ticks')
     ncols = 4
     nrows = (num_to_sample + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(7.25, 6), sharey=True)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.25, 5.6), sharey=True)
+    plt.subplots_adjust(left=0.1, right=0.97, top=0.92, bottom=0.07,  hspace=0.25)
     axes = axes.flatten() if num_to_sample > 1 else [axes]
     
     plot_styles = {
@@ -1659,14 +1613,12 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
                         zorder=style['zorder'])
 
         ax.set_yscale('log')
-        # 调整坐标轴线的粗细
         ax_linewidth = 0.8
         for spine in ax.spines.values():
             spine.set_linewidth(ax_linewidth)
-        # 设置 x 轴刻度间隔为 10
         ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
-        # 设置刻度标签字体大小
         ax.xaxis.set_tick_params(labelsize=final_font_sizes['tick'])
+        ax.yaxis.set_tick_params(labelsize=final_font_sizes['tick'])
         # ax.grid(True, which='major', linestyle='--', alpha=0.7)
         # ax.grid(True, which='minor', linestyle=':', alpha=0.4)
         # ax.tick_params(axis='both', which='major', labelsize=final_font_sizes['tick'])
@@ -1679,8 +1631,233 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
     
 
 
+    # --- 4. 保存 ---
+    for i in range(num_to_sample, len(axes)):
+        axes[i].axis('off')
+
+    if num_to_sample > 0:
+        for i in range(nrows):
+            ax = axes[i * ncols]
+            if i * ncols < num_to_sample:
+                ax.set_ylabel('Pressure (hPa)', fontsize=final_font_sizes['label'])
+                yticks = [1, 10, 30]
+                ax.set_yticks(yticks)
+                ax.yaxis.set_major_formatter(FuncFormatter(log_sci_formatter))
+                # ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+        
+        max_p = loaded_data['True MLS OH'].pressure.max().values
+        min_p = loaded_data['True MLS OH'].pressure.min().values
+        axes[0].set_ylim(max_p*1.05, min_p*0.95)
+
+    handles, labels = [], []
+    if num_to_sample > 0:
+        first_ax_with_content = next((ax for ax in axes if ax.has_data()), None)
+        if first_ax_with_content:
+            h, l = first_ax_with_content.get_legend_handles_labels()
+            for handle, label in zip(h, l):
+                if label not in labels:
+                    labels.append(label)
+                    handles.append(handle)
+    # print(f"Legend handles: {handles}, labels: {labels}")
+    if handles:
+        fig.legend(handles, labels, loc='upper center', ncol=len(labels), 
+                   bbox_to_anchor=(0.5, 1.0), fontsize=final_font_sizes['legend'])
+
+    
+    data_date_obj = datetime.strptime(f'{year}-{doy}', '%Y-%j')
+    formatted_date = data_date_obj.strftime('%d %b %Y')    
+    # fig.text(0.99, 0.98, f'Date: {formatted_date}', ha='right', va='top',
+    #          fontsize=11, color='grey', alpha=0.7)
+    
+    plot_path = os.path.join(plot_dir, f'Figure1_profile_comparison_{year}_day{doy}.pdf')
+    plt.savefig(plot_path, dpi=400)
+    plt.close(fig)
+    print(f"Saved final OH profile comparison plot to: {plot_path}")
+
+
+def plot_profile_comparison_3line(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, random_seed=42, font_sizes=None):
+    """
+    绘制OH垂直剖面对比图。MLS观测的不确定度使用误差棒(error bars)形式展示，
+    """
+    print(f"\n--- Generating OH Profile Comparison for {year}, Day {doy} ---")
+
+    # Apply style first so later rcParams overrides stay effective.
+    plt.style.use('seaborn-v0_8-ticks')
+
+    # # --- 1. 设置与数据加载 ---
+    font_path = 'Plot/fonts/MYRIADPRO-REGULAR.OTF'
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        # 获取加载后的字体真实名称（通常是 'Myriad Pro'）
+        prop = fm.FontProperties(fname=font_path)
+        myriad_font = prop.get_name()
+    else:
+        print(f"Warning: Font file {font_path} not found. Using sans-serif.")
+        myriad_font = 'Arial'
+
+    # 全局字体配置
+    plt.rcParams.update({
+        'font.family': [myriad_font],
+        'font.sans-serif': [myriad_font],
+        # 显式重定向 cursive，防止它去系统里乱找
+        'font.cursive': [myriad_font], 
+        'font.fantasy': [myriad_font],
+        'font.serif': [myriad_font],
+        'pdf.fonttype': 42,  # 避免导出为轮廓，确保文字可编辑
+        'mathtext.fontset': 'custom',
+        'mathtext.it': f'{myriad_font}:italic',
+        'mathtext.rm': myriad_font,
+        'mathtext.bf': f'{myriad_font}:bold',
+        'mathtext.sf': myriad_font,
+        'mathtext.tt': myriad_font,
+        'mathtext.cal': myriad_font,
+        'axes.unicode_minus': False,
+    })
+
+    # 严格按照期刊要求的 6-8 pt 字号
+    f_size = {'title': 8, 'label': 8, 'tick': 8, 'legend': 8, 'panel': 9}
+
+    if font_sizes is None: font_sizes = {}
+    final_font_sizes = {**f_size, **font_sizes}
+
+    data_sources = {
+        'Predicted MLS-OH': f'predicted_MLS_OH_density_gridded_{year}.nc',
+        'Predicted MLS-OH Uncertainty': f'predicted_MLS_OH_uncertainty_density_gridded_{year}.nc',
+        'TOMCAT OH': f'TOMCAT_OH_density_gridded_{year}.nc',
+        'SSA OH': f'calculated_SSA_OH_density_gridded_{year}.nc'
+    }
+
+    loaded_data = {}
+    for key, fname in data_sources.items():
+        filepath = os.path.join(OUTPUT_DIR, fname)
+        try:
+            ds = xr.open_dataset(filepath)
+            var_name = list(ds.data_vars)[0]
+            loaded_data[key] = ds[var_name].sel(doy=doy, method='nearest')
+        except FileNotFoundError:
+            print(f"Info: 未找到文件 '{fname}'，将跳过此数据源。")
+    # 加载参考的 True MLS OH 数据
+    true_mls_fname = f'true_MLS_OH_density_gridded_{year}.nc'
+    true_mls_filepath = os.path.join(Constant_var_path, true_mls_fname)
+    try:
+        ds_true = xr.open_dataset(true_mls_filepath)
+        var_name_true = list(ds_true.data_vars)[0]
+        loaded_data['True MLS OH'] = ds_true[var_name_true].sel(doy=doy, method='nearest')
+    except FileNotFoundError:
+        print(f"Error: 未找到参考文件 '{true_mls_fname}'。绘图中止。")
+        return
+
+    # --- 2. 地理位置的均匀随机采样 ---
+    ref_data = loaded_data['True MLS OH']
+    valid_points_stacked = ref_data.stack(points=('lat', 'lon')).dropna(dim='points', how='all')
+    if len(valid_points_stacked.points) == 0:
+        print(f"在第 {doy} 天未找到任何有效的 'True MLS OH' 数据点。")
+        return
+    num_to_sample = min(num_profiles, len(valid_points_stacked.points))
+    rng = np.random.RandomState(seed=random_seed)
+    num_bins = num_to_sample
+    lat_bins = np.linspace(valid_points_stacked.lat.min().item(), valid_points_stacked.lat.max().item(), num_bins + 1)
+    selected_points = []
+    for i in range(num_bins):
+        bin_points = valid_points_stacked.where(
+            (valid_points_stacked.lat >= lat_bins[i]) & (valid_points_stacked.lat < lat_bins[i + 1]),
+            drop=True
+        )
+        if len(bin_points.points) > 0:
+            random_index = rng.choice(len(bin_points.points), size=1, replace=False)
+            selected_points.append(bin_points.points.isel(points=random_index))
+    selected_points = xr.concat(selected_points, dim='points').sortby('lat')
+
+    # Set the unit to 10^6 cm^-3 for plotting
+    for key in loaded_data:
+        loaded_data[key] = loaded_data[key] / 1e6
+
+    # --- 3. 绘图 ---
+    ncols = 4
+    nrows = (num_to_sample + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.25, 5.6), sharey=True)
+    plt.subplots_adjust(left=0.1, right=0.97, top=0.92, bottom=0.07,  hspace=0.25)
+    axes = axes.flatten() if num_to_sample > 1 else [axes]
+    
+    plot_styles = {
+        'True MLS OH': {'color': 'blue', 'label': 'MLS OH Obs and Uncertainty', 'zorder': 3,'linewidth': 0.8},
+        'Predicted MLS-OH': {'color': 'green', 'linestyle': '-','linewidth': 0.8,'marker': '.', 'label': 'DRCAT-Predicted OH', 'zorder': 2},
+        'TOMCAT OH': {'color': 'orange', 'linestyle': '--','linewidth': 0.8,'marker': 'x', 'label': 'TOMCAT OH', 'zorder': 1},
+        'SSA OH': {'color': 'black', 'linestyle': '-.','linewidth': 0.8,'marker': 's', 'markersize': 2, 'label': 'SSA OH', 'zorder': 0}
+    }
+
+    for i, point in enumerate(selected_points):
+        ax = axes[i]
+        lat, lon = point.item()
+        lat_str = f"{abs(lat):.1f}°N" if lat >= 0 else f"{abs(lat):.1f}°S"
+        lon_str = f"{abs(lon):.1f}°E" if lon >= 0 else f"{abs(lon):.1f}°W"
+        ax.set_title(f"{lat_str}, {lon_str}", fontsize=final_font_sizes['title'])
+
+        # --- 绘图逻辑修改 ---
+        # 0. PLOT TOMCAT AND SSA PROFILES IF AVAILABLE
+        for model_key in ['TOMCAT OH', 'SSA OH']:
+            if model_key in loaded_data:
+                style = plot_styles[model_key]
+                profile = loaded_data[model_key].sel(lat=lat, lon=lon, method='nearest')
+                pressure = profile.pressure.values
+                ax.plot(profile.values, pressure, **style)
+
+
+
+        # 1. 绘制 ML 预测值及其不确定度
+        if 'Predicted MLS-OH' in loaded_data:
+            style = plot_styles['Predicted MLS-OH']
+            profile = loaded_data['Predicted MLS-OH'].sel(lat=lat, lon=lon, method='nearest')
+            pressure = profile.pressure.values
+            ax.plot(profile.values, pressure, **style)
+            
+            if 'Predicted MLS-OH Uncertainty' in loaded_data:
+                unc_profile = loaded_data['Predicted MLS-OH Uncertainty'].sel(lat=lat, lon=lon, method='nearest')
+                ax.fill_betweenx(pressure,
+                                 profile.values - unc_profile.values,
+                                 profile.values + unc_profile.values,
+                                 color=style['color'], alpha=0.1, label='±Estimated Uncertainty')
+
+        # 2. 绘制 MLS 观测值及其误差棒
+        if 'True MLS OH' in loaded_data:
+            style = plot_styles['True MLS OH']
+            profile = loaded_data['True MLS OH'].sel(lat=lat, lon=lon, method='nearest')
+            pressure = profile.pressure.values
+            
+            precision_profile = np.piecewise(pressure,
+                [pressure < 10, (pressure >= 10) & (pressure < 14), pressure >= 14],
+                [2.8, 4.7, 13.7]
+            )
+            accuracy_profile = np.piecewise(pressure,
+                [pressure < 14, pressure >= 14],
+                [1.0, 1.5]
+            )
+            total_uncertainty_profile = np.sqrt((precision_profile)**2 + (accuracy_profile)**2)
+            
+            # 使用 ax.errorbar 绘制
+            ax.errorbar(profile.values, pressure, xerr=total_uncertainty_profile,
+                        fmt='-',             # 仅绘制点标记
+                        markersize=5,        # 标记大小
+                        capsize=3,           # 误差棒端点帽的大小
+                        elinewidth=0.2,        # 误差棒线宽
+                        linewidth=style['linewidth'],
+                        color=style['color'],
+                        label=style['label'],
+                        zorder=style['zorder'])
+
+        ax.set_yscale('log')
+        ax_linewidth = 0.8
+        for spine in ax.spines.values():
+            spine.set_linewidth(ax_linewidth)
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+        ax.xaxis.set_tick_params(labelsize=final_font_sizes['tick'])
+        ax.yaxis.set_tick_params(labelsize=final_font_sizes['tick'])
+
+    fig.text(0.5, 0.01, r'OH Density (10$^{6}$ cm$^{-3}$)', ha='center', fontsize=final_font_sizes['label'])
+    
+
+
     # --- 4. 最终美化与保存 ---
-    # (此部分与之前版本相同)
     for i in range(num_to_sample, len(axes)):
         axes[i].axis('off')
 
@@ -1710,7 +1887,7 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
                     handles.append(handle)
     # print(f"Legend handles: {handles}, labels: {labels}")
     if handles:
-        fig.legend(handles, labels, loc='upper center', ncol=len(labels), 
+        fig.legend(handles, labels, loc='upper center', ncol=3, 
                    bbox_to_anchor=(0.5, 1.0), fontsize=final_font_sizes['legend'])
 
     fig.tight_layout(rect=[0, 0.02, 1, 0.95])
@@ -1720,7 +1897,10 @@ def plot_profile_comparison(year, doy, plot_dir, OUTPUT_DIR, num_profiles=10, ra
     # fig.text(0.99, 0.98, f'Date: {formatted_date}', ha='right', va='top',
     #          fontsize=11, color='grey', alpha=0.7)
     
-    plot_path = os.path.join(plot_dir, f'Figure1_profile_comparison_{year}_day{doy}.pdf')
+    plot_path = os.path.join(plot_dir, f'Figure1_Supp_profile_comparison_{year}_day{doy}.pdf')
     plt.savefig(plot_path, dpi=400)
     plt.close(fig)
-    print(f"✅ Saved final OH profile comparison plot to: {plot_path}")
+    print(f"Saved final OH profile 3line comparison plot to: {plot_path}")
+
+
+

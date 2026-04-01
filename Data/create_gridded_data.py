@@ -38,7 +38,6 @@ def vmr_to_number_density(vmr, pressure_pa, temperature_k):
 def create_gridded_netcdf(df_with_preds, var_name, p_levels, output_dir, lat_res=2.78, lon_res=2.8125):
     """
     将包含预测结果的 long-format DataFrame 转换为格点化的 NetCDF 文件。
-    (V2: 已修正由于浮点不匹配导致的IndexError)
     """
     print(f"正在为变量 '{var_name}' 创建格点化 NetCDF 文件...")
 
@@ -118,7 +117,7 @@ def create_gridded_netcdf(df_with_preds, var_name, p_levels, output_dir, lat_res
         name=var_name
     )
     da.attrs['long_name'] = f'Predicted {var_name.replace("_density", "")} Number Density'
-    da.attrs['units'] = 'molecules 10^6 cm-3'
+    da.attrs['units'] = 'molecules cm-3'
     da.pressure.attrs['units'] = 'hPa'
     output_path = os.path.join(output_dir, f'{var_name}_gridded_{year}.nc')
     da.to_netcdf(output_path)

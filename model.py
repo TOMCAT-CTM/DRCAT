@@ -22,7 +22,7 @@ class ChemistryModule(nn.Module):
         return self.net(x)
 
 class GraphConstructor(nn.Module):
-    """动态构建压力层之间的邻接矩阵（关系图）"""
+    """动态构建压力层之间的邻接矩阵"""
     def __init__(self, num_nodes, k, dim, alpha=3.0):
         super().__init__()
         self.num_nodes, self.k, self.alpha = num_nodes, k, alpha

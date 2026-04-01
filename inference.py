@@ -98,7 +98,7 @@ def generate_features_with_chemical_module(df_in, chem_features, p_levels, model
     return df_out
 
 
-# --- 2. 独立推理与分析工作流 ---
+# --- 2. 推理 ---
 
 def vmr_to_number_density(vmr, pressure_pa, temperature_k):
     """
@@ -120,7 +120,7 @@ def vmr_to_number_density(vmr, pressure_pa, temperature_k):
 
 def create_gridded_netcdf(df_with_preds, var_name, p_levels, output_dir, lat_res=2.78, lon_res=2.8125):
 
-    print(f" Create NC file for '{var_name}' ...")
+    # print(f" Create NC file for '{var_name}' ...")
     if var_name not in df_with_preds.columns or df_with_preds[var_name].isnull().all():
         print(f"  '{var_name}' skipped")
         return
@@ -182,55 +182,6 @@ def create_gridded_netcdf(df_with_preds, var_name, p_levels, output_dir, lat_res
     output_path = os.path.join(output_dir, f'{var_name}_gridded_{year}.nc')
     da.to_netcdf(output_path)
     print(f"saved at : {output_path}")
-
-def plot_inference_anomaly(day_of_year, target_year, baseline_year, plot_dir):
-    """
-    加载两个年份的NetCDF推理结果，计算并绘制指定日的相对变化（异常百分比）。
-    """
-    try:
-        ds_ssa_target = xr.open_dataset(os.path.join(plot_dir, f'predicted_SSA_OH_density_gridded_{target_year}.nc'))
-        ds_mls_target = xr.open_dataset(os.path.join(plot_dir, f'predicted_MLS_OH_density_gridded_{target_year}.nc'))
-        ds_ssa_baseline = xr.open_dataset(os.path.join(plot_dir, f'predicted_SSA_OH_density_gridded_{baseline_year}.nc'))
-        ds_mls_baseline = xr.open_dataset(os.path.join(plot_dir, f'predicted_MLS_OH_density_gridded_{baseline_year}.nc'))
-    except FileNotFoundError as e:
-        print(f"错误: 找不到NetCDF文件。请确保已为 {target_year} 和 {baseline_year} 年都成功运行了推理模块。 Error: {e}")
-        return
-
-    ssa_zonal_target = ds_ssa_target[list(ds_ssa_target.data_vars)[0]].sel(doy=day_of_year, method="nearest").mean(dim='lon', skipna=True)
-    mls_zonal_target = ds_mls_target[list(ds_mls_target.data_vars)[0]].sel(doy=day_of_year, method="nearest").mean(dim='lon', skipna=True)
-    ssa_zonal_baseline = ds_ssa_baseline[list(ds_ssa_baseline.data_vars)[0]].sel(doy=day_of_year, method="nearest").mean(dim='lon', skipna=True)
-    mls_zonal_baseline = ds_mls_baseline[list(ds_mls_baseline.data_vars)[0]].sel(doy=day_of_year, method="nearest").mean(dim='lon', skipna=True)
-
-    epsilon = 1e-12
-    ssa_anomaly = ((ssa_zonal_target - ssa_zonal_baseline) / (ssa_zonal_baseline + epsilon)) * 100
-    mls_anomaly = ((mls_zonal_target - mls_zonal_baseline) / (mls_zonal_baseline + epsilon)) * 100
-
-    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 12), sharex=True, sharey=True)
-    fig.suptitle(f'Zonal Mean OH Anomaly for Day {day_of_year} ({target_year} vs {baseline_year})', fontsize=16)
-    
-    anomaly_cmap = 'RdBu_r'
-    max_anomaly = 100
-
-    ssa_anomaly.plot.pcolormesh(
-        ax=axes[0], x='lat', y='pressure', cmap=anomaly_cmap, vmin=-max_anomaly, vmax=max_anomaly,
-        cbar_kwargs={'label': 'OH Change (%)', 'extend': 'both'}
-    )
-    axes[0].invert_yaxis(); axes[0].set_title('Predicted SSA-OH Anomaly'); axes[0].set_xlabel('')
-
-    mls_anomaly.plot.pcolormesh(
-        ax=axes[1], x='lat', y='pressure', cmap=anomaly_cmap, vmin=-max_anomaly, vmax=max_anomaly,
-        cbar_kwargs={'label': 'OH Change (%)', 'extend': 'both'}
-    )
-    axes[1].invert_yaxis(); axes[1].set_title('Predicted MLS-OH Anomaly (Final Model)'); axes[1].set_xlabel('Latitude')
-
-    for ax in axes:
-        ax.set_yscale('log'); ax.set_ylabel('Pressure (hPa)'); ax.grid(True, linestyle='--', alpha=0.6)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    output_filename = os.path.join(plot_dir, f'inference_anomaly_day_{day_of_year}_{target_year}_vs_{baseline_year}.png')
-    plt.savefig(output_filename, dpi=300)
-    print(f"✅ 相对变化图已保存为: {output_filename}")
-    plt.close(fig) # 关闭图形
 
 
 @torch.no_grad()
@@ -308,7 +259,7 @@ def run_inference(inference_data_path, chem_features, p_levels, plot_dir, device
         'predicted_MLS_OH_density',
         'predicted_MLS_OH_uncertainty_density', 'calculated_SSA_OH_density',
         'true_MLS_OH_density', 'TOMCAT_OH_density', 'H2O'
-    ]  #'predicted_SSA_OH_density',
+    ]  
     
     for var_name in vars_to_save:
         create_gridded_netcdf(results_df, var_name, p_levels, plot_dir)

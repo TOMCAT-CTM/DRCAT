@@ -26,12 +26,13 @@ from inference import *
 
 DATA_PATH = '/scratch/pdpv7239/SSA_dataset/'
 BASE_PATH = '/scratch/pdpv7239/SSA_dataset_base/'
+pressure_levels = np.load('Data/DRCAT_V10/pressure_levels.npy')
+
 PLOT_OUTPUT_DIR = 'Data/DRCAT_V10'
 CHEM_FEATURES = [ 'H2O', 'O3', 'Temperature', 'HNO3','N2O','HCl','HO2']
 
-pressure_levels = np.load('Data/DRCAT_V10/pressure_levels.npy')
 
-for INFERENCE_YEAR in range(2005,2010):
+for INFERENCE_YEAR in [2005,2006,2007,2008,2009,2011,2014,2021,2022]: #range(2011,2012):
     INFERENCE_DATA_PATH = f'Data/base_data/ml_ready_OH_data_FE_augmented_{INFERENCE_YEAR}.parquet'
     if os.path.exists(INFERENCE_DATA_PATH):
         run_inference(

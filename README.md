@@ -31,11 +31,19 @@ This repository provide example code to run DRCAT model. It also provides pretra
 ## Usage
 
 ```bash
-# single gpu
+# install python packages
+pip install -r requirements.txt
+
+# run model inference
 python -u run.py 
 
-# multi-gpu
-python -u run.py
+# prepare constant data
+# you can download from zenode repo or generate files using Data/create_gridded_data.py
+python create_gridded_data.py
+
+# plot figures automatically (make sure to download data)
+python plot_results.py
+
 ```
 
 
