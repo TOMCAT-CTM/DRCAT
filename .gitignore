@@ -8,4 +8,4 @@ Data/**/*.parquet
 recycle_bin/
 file_process/
 Plot/Results/
-./Constant_Data.tar.gz
+**.tar.gz
